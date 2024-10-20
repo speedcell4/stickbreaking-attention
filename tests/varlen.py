@@ -60,6 +60,7 @@ def ref_bwd(do, q, k, v, lengths):
 class TestClass:
     @pytest.mark.parametrize('batch_size, num_heads, head_dim, length, dtype', [
         (4, 1, 32, 512, torch.float32),
+        (4, 8, 64, 512, torch.float32),
     ])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype):
         torch.set_printoptions(linewidth=1024, edgeitems=500)
