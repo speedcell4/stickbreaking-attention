@@ -58,10 +58,11 @@ def ref_bwd(do, q, k, v, lengths):
     return output, dq, dk, dv
 
 class TestClass:
-    @pytest.mark.parametrize('batch_size, num_heads, head_dim, length, dtype', [
-        (4, 1, 32, 512, torch.float32),
-        (4, 8, 64, 512, torch.float32),
-    ])
+    @pytest.mark.parametrize('batch_size', [2, 4])
+    @pytest.mark.parametrize('num_heads', [1, 2, 4, 8])
+    @pytest.mark.parametrize('head_dim', [16, 32, 64])
+    @pytest.mark.parametrize('length', [512, 1024, 2048, 4096])
+    @pytest.mark.parametrize('dtype', [torch.float32])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype):
         torch.set_printoptions(linewidth=1024, edgeitems=500)
         device = torch.device('cuda:0')
