@@ -58,9 +58,10 @@ def ref_bwd(do, q, k, v, lengths):
     return output, dq, dk, dv
 
 class TestClass:
+
     @pytest.mark.parametrize('batch_size', [2, 4])
-    @pytest.mark.parametrize('num_heads', [1, 2, 4, 8])
-    @pytest.mark.parametrize('head_dim', [16, 32, 64])
+    @pytest.mark.parametrize('num_heads', [1, 2, 4, 8, 7])
+    @pytest.mark.parametrize('head_dim', [16, 32, 64, 50])
     @pytest.mark.parametrize('length', [512, 1024, 2048, 4096])
     @pytest.mark.parametrize('dtype', [torch.float32])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype):
@@ -83,7 +84,7 @@ class TestClass:
         o = o + rem[..., None] * v
         dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
         torch.cuda.synchronize()
-        # * 0. + total_length - torch.arange(total_length, device=lengths.device)[:, None]
+
         ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
         print("o", (ref_out - o).abs().max())
         print("dq", (ref_dq - dq).abs().max())

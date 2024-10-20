@@ -8,8 +8,8 @@ log2: tl.constexpr = math.log(2)
 inv_log2: tl.constexpr = 1 / log2
 ALLOW_TF32: tl.constexpr = False
 DEBUG: tl.constexpr = False
-BLOCK_M = 64
-BLOCK_N = 64
+BLOCK_M: tl.constexpr = 64
+BLOCK_N: tl.constexpr = 64
 
 
 def row_block_counts_and_sequence_ids(cu_seqlens: torch.Tensor, BLOCK_M: int, BLOCK_N: int):
