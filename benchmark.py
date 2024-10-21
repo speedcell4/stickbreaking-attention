@@ -5,6 +5,9 @@ from torch.nn import functional as F
 from stickbreaking_attention.sb_varlen import sb_flash_attn_varlen
 import triton
 import triton.language as tl
+from flash_attn import flash_attn_varlen_func
+from torch import nn
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, rotate_half
 
 
 # for reference
@@ -60,10 +63,36 @@ def tri_fwdbwd(do, q, k, v, lengths):
     dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
     return o, dq, dk, dv
 
+def flash_fwdbwd(rope, position_ids, do, q, k, v, lengths):
+    cos, sin = rope(v, position_ids)
+    q = (q * cos) + (rotate_half(q) * sin)
+    k = (k * cos) + (rotate_half(k) * sin)
+
+    lengths = lengths.to(torch.int32)
+    cu_seqlens = torch.cumsum(lengths, dim=-1)
+    cu_seqlens = F.pad(cu_seqlens, (1, 0)).to(torch.int32)
+    max_len = torch.max(lengths)
+
+    q = q.permute(1, 0, 2)
+    k = k.permute(1, 0, 2)
+    v = v.permute(1, 0, 2)
+    o = flash_attn_varlen_func(
+        q, k, v,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_len,
+        max_seqlen_k=max_len,
+        causal=True
+    )
+    o = o.permute(1, 0, 2)
+    dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
+    return o, dq, dk, dv
+
 
 providers = [
     ("reference", "Stickbreaking (ref.)", ("red", "-")),
     ("triton", "Stickbreaking", ("blue", "-")),
+    ("flash", "Flash Attention", ("green", "-")),
 ]
 @triton.testing.perf_report([
     triton.testing.Benchmark(
@@ -91,10 +120,16 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider):
     k.requires_grad_()
     v.requires_grad_()
     do = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
+    rope = LlamaRotaryEmbedding(dim=head_dim).to(device)
+    position_ids = torch.arange(q.size(1), device=device, dtype=torch.int32)[None, :]
+
     if provider== "reference":
         fun = lambda: ref_fwdbwd(do, q, k, v, lengths)
     elif provider == "triton":
         fun = lambda: tri_fwdbwd(do, q, k, v, lengths)
+    elif provider == "flash":
+        fun = lambda: flash_fwdbwd(rope, position_ids, do, q, k, v, lengths)
+
     return triton.testing.do_bench(fun, warmup=warmup, rep=rep)
 
 
