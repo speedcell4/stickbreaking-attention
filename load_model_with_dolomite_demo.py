@@ -2,4 +2,8 @@ import transformers
 from dolomite_engine import hf_models
 
 if __name__ == "__main__":
-    hf_models = transformers.AutoModelForCausalLM.from_pretrained('/proj/checkpoints/shawntan/hf_models/stickbreaking')
+    hf_models = transformers.AutoModelForCausalLM.from_pretrained(
+            'shawntan/stickbreaking-3b',
+            # use_auth_token=True,
+            # token='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'
+    )
