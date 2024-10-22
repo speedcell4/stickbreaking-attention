@@ -20,7 +20,7 @@ setup(
         'torch',
         'triton',
     ],
-    tests_require=['pytest'],
+    tests_require=['pytest', 'numpy'],
     classifiers=[
         "Development Status :: 1 - Planning",
         "License :: OSI Approved :: Apache Software License",
