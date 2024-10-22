@@ -2,7 +2,7 @@ import torch
 import pytest
 import math
 from torch.nn import functional as F
-from stickbreaking_attention.sb_varlen import sb_flash_attn_varlen
+from stickbreaking_attention.sb_varlen import sb_attn_varlen
 import triton
 import triton.language as tl
 from flash_attn import flash_attn_varlen_func
@@ -56,9 +56,9 @@ def ref_fwdbwd(do, q, k, v, lengths):
 
 def tri_fwdbwd(do, q, k, v, lengths):
     cu_seqlens = torch.cumsum(lengths, dim=-1)
-    o, rem = sb_flash_attn_varlen(q, k, v, cu_seqlens,
-                                  inv_temp=1 / math.sqrt(q.size(-1)),
-                                  zero_start=False)
+    o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
+                            inv_temp=1 / math.sqrt(q.size(-1)),
+                            zero_start=False)
     o = o + rem[..., None] * v
     dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
     return o, dq, dk, dv

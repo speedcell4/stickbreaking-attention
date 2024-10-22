@@ -2,7 +2,7 @@ import torch
 import pytest
 import math
 from torch.nn import functional as F
-from stickbreaking_attention.sb_varlen import sb_flash_attn_varlen
+from stickbreaking_attention.sb_varlen import sb_attn_varlen
 
 # for reference
 def stickbreaking(q, k, v, mask, cum_weight):
@@ -78,9 +78,9 @@ class TestClass:
         k.requires_grad_()
         v.requires_grad_()
         do = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
-        o, rem = sb_flash_attn_varlen(q, k, v, cu_seqlens,
-                                      inv_temp=1 / math.sqrt(q.size(-1)),
-                                      zero_start=False)
+        o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
+                                inv_temp=1 / math.sqrt(q.size(-1)),
+                                zero_start=False)
         o = o + rem[..., None] * v
         dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
         torch.cuda.synchronize()
