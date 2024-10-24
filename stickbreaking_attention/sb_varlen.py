@@ -33,21 +33,26 @@ def softplus(x):
 
 @triton.jit
 def compute_attn_weights(
-    q, k, cm, neg_log_acc, qk_scale, mask, MASK: tl.constexpr, ALLOW_TF32: tl.constexpr = ALLOW_TF32
+    q, k, cm, neg_log_acc, qk_scale, mask, MASK: tl.constexpr, ALLOW_TF32: tl.constexpr = ALLOW_TF32,
+    backward: tl.constexpr = False
 ):
     qk = tl.dot(q, k, allow_tf32=ALLOW_TF32)
     qk *= qk_scale
     neg_log = -softplus(qk).to(q.dtype)
-    _log_p = qk + neg_log_acc[:, None]
+    _log_p = qk
     if MASK:
         neg_log = tl.where(mask, neg_log, 0.0).to(neg_log.dtype)
-        _log_p += tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
+        if backward:
+            neg_log_acc = neg_log_acc - tl.sum(neg_log, axis=1)
+        _log_p += tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
         p = tl.math.exp2(_log_p)
         p = tl.where(mask, p, 0.0).to(p.dtype)
     else:
-        _log_p += tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
+        if backward:
+            neg_log_acc = neg_log_acc - tl.sum(neg_log, axis=1)
+        _log_p += tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
         p = tl.math.exp2(_log_p)
-    return neg_log, p
+    return neg_log, p, neg_log_acc
 
 
 # @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=['batch_size', 'token_size'],)
@@ -60,6 +65,7 @@ def _forward(
     M_ptr, stride_mh, stride_mi, stride_mm,
     CRB_ptr,
     R_ptr, stride_rh, stride_rm,
+    A_ptr, stride_ah, stride_am,
     batch_ptr,
     CSL_ptr,
     logit_scale,
@@ -101,6 +107,7 @@ def _forward(
     O_blk_ptrs = O_ptr + stride_oh * head_id + stride_om * M_blk_idxs[:, None] + stride_od * D_range[None, :]
     M_blk_ptrs = M_ptr + stride_mh * head_id + stride_mi * M_start_idx + stride_mm * M_range
     R_blk_ptrs = R_ptr + stride_rh * head_id + stride_rm * M_blk_idxs
+    A_blk_ptrs = A_ptr + stride_ah * head_id + stride_am * M_blk_idxs
 
     # --- Load band vectors ---
     M_mask = M_blk_idxs < token_size
@@ -128,7 +135,7 @@ def _forward(
         on_band = i < BLOCK_M // BLOCK_N
         is_last_block = i == (iters - 1)
         on_N_edge = on_band and i == 0
-        neg_log, p, _, v = compute_block(
+        neg_log, p, _, v, _ = compute_block(
             q=q,
             neg_log_acc=neg_log_acc,
             min_start_idxs=min_start_idxs,
@@ -154,6 +161,7 @@ def _forward(
 
     tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
     tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
+    tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
 
 
 @triton.jit
@@ -174,6 +182,7 @@ def compute_block(
     is_same_start: tl.constexpr,
     on_N_edge: tl.constexpr,
     on_band: tl.constexpr,
+    backward: tl.constexpr = False
 ):
 
     if on_N_edge:
@@ -183,16 +192,17 @@ def compute_block(
     else:
         k = tl.load(K_blk_ptrs, mask=D_mask[:, None])
         v = tl.load(V_blk_ptrs, mask=D_mask[None, :])
+    
 
     needs_mask = on_band or not (is_same_start and (not is_last_block))
     if needs_mask:  # On band
         mask = start_idxs[:, None] <= N_blk_idxs[None, :]  # sequence boundary
         if on_band:
             mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :]  # diagonal boundary
-        neg_log, p = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, mask, MASK=True)
+        neg_log, p, neg_log_acc = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, mask, MASK=True, backward=backward)
     else:
-        neg_log, p = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, None, MASK=False)
-    return neg_log, p, k, v
+        neg_log, p, neg_log_acc = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, None, MASK=False, backward=backward)
+    return neg_log, p, k, v, neg_log_acc
 
 
 def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_grad=False):
@@ -206,11 +216,14 @@ def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_g
             logit_scale = 1 / math.sqrt(dim_size)
         o = torch.zeros_like(q)
         rem = torch.zeros_like(q[:, :, 0], device=q.device)
+        neg_log_acc = torch.zeros_like(q[:, :, 0], device=q.device, dtype=torch.float32)
         if no_grad:
             M = torch.zeros((1, 1, 1), device=q.device, dtype=q.dtype)
         else:
             M = torch.zeros((num_heads, cu_row_blocks[-1], BLOCK_M), device=q.device, dtype=q.dtype)
+
         M_count = triton.cdiv(token_size, BLOCK_M)
+
         grid = (num_heads, M_count)
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
@@ -220,6 +233,7 @@ def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_g
             M, M.stride(0), M.stride(1), M.stride(2),
             cu_row_blocks,
             rem, rem.stride(0), rem.stride(1),
+            neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
             batch_ids,
             cu_seqlens,
             logit_scale=logit_scale,
@@ -231,7 +245,7 @@ def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_g
             BLOCK_N=BLOCK_N,
             BLOCK_D=BLOCK_D,
         )
-        return o, rem, M
+        return o, rem, M, neg_log_acc
 
 
 @triton.jit
@@ -243,6 +257,7 @@ def _backward_dq(
     V_ptr, stride_vh, stride_vn, stride_vd,
     DQ_ptr, stride_dqh, stride_dqm, stride_dqd,
     M_ptr, stride_mh, stride_mi, stride_mm,
+    A_ptr, stride_ah, stride_am,
     DM_ptr,
     CRB_ptr,
     batch_ptr,
@@ -286,6 +301,7 @@ def _backward_dq(
     DO_blk_ptrs = DO_ptr + stride_doh * head_id + stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :]
     DQ_blk_ptrs = DQ_ptr + stride_dqh * head_id + stride_dqm * M_blk_idxs[:, None] + stride_dqd * D_range[None, :]
     DR_blk_ptrs = DR_ptr + stride_drh * head_id + stride_drm * M_blk_idxs
+    A_blk_ptrs = A_ptr + stride_ah * head_id + stride_am * M_blk_idxs
     M_blk_ptrs = M_ptr + stride_mh * head_id + stride_mi * M_start_idx + stride_mm * M_range
     DM_blk_ptrs = DM_ptr + stride_mh * head_id + stride_mi * M_start_idx + stride_mm * M_range
 
@@ -305,12 +321,17 @@ def _backward_dq(
     is_same_start = min_start_idxs == tl.max(start_idxs)
     iters = last_N_block_id - first_N_block_id
     N_block_id = first_N_block_id
+    neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask, other=0.0)
     for i in range(iters):
-        neg_log_acc = tl.load(M_blk_ptrs)
+        neg_log_acc__ = tl.load(M_blk_ptrs)
+
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
         is_last_block = i == 0
         on_N_edge = on_band and i == iters - 1
-        neg_log, p, k, v = compute_block(
+
+        neg_log_acc_ = neg_log_acc
+
+        neg_log, p, k, v, neg_log_acc = compute_block(
             q=q,
             neg_log_acc=neg_log_acc,
             min_start_idxs=min_start_idxs,
@@ -327,7 +348,13 @@ def _backward_dq(
             is_same_start=is_same_start,
             on_N_edge=is_same_start,
             on_band=on_band,
+            backward=True
         )
+
+        diff = tl.max(tl.where(M_mask, tl.abs(neg_log_acc_ - (neg_log_acc__ + tl.sum(neg_log, axis=1))), 0.))
+        if diff > 1e-4:
+            tl.device_print("gap!", diff)
+ 
         tl.store(DM_blk_ptrs, grad_prev_acc)
         # --- End compute attn stuff ---
         # --- Do gradient stuff ---
@@ -438,9 +465,9 @@ def _backward_dkdv(
             mask = M_blk_idxs[:, None] < end_idxs[None, :]  # sequence boundary
             if on_band:
                 mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :]  # diagonal boundary
-            neg_log, p = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, mask, MASK=True)
+            neg_log, p, _ = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, mask, MASK=True)
         else:
-            neg_log, p = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, None, MASK=False)
+            neg_log, p, _ = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, None, MASK=False)
 
         # --- End compute attn stuff ---
         # --- Do gradient stuff ---
@@ -461,7 +488,7 @@ def _backward_dkdv(
     tl.store(DV_blk_ptrs, dv.to(DV_ptr.type.element_ty), mask=N_mask[:, None] & D_mask[None, :])
 
 
-def sb_bwd(do, dr, q, k, v, cu_seqlens, M, sequence_ids, cu_row_blocks, first_row_block, logit_scale=None):
+def sb_bwd(do, dr, q, k, v, cu_seqlens, M, neg_log_acc, sequence_ids, cu_row_blocks, first_row_block, logit_scale=None):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)
         num_heads = q.size(0)
@@ -487,6 +514,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, M, sequence_ids, cu_row_blocks, first_ro
             v, v.stride(0), v.stride(1), v.stride(2),
             dq, dq.stride(0), dq.stride(1), dq.stride(2),
             M, M.stride(0), M.stride(1), M.stride(2),
+            neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
             DM,
             cu_row_blocks,
             sequence_ids,
@@ -531,19 +559,19 @@ class StickBreakingAttention(torch.autograd.Function):
     def forward(ctx, q, k, v, cu_seqlens, cu_row_blocks, first_row_block, sequence_ids, inv_temp):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
-        o, rem, M = sb_fwd(q, k, v, cu_seqlens, sequence_ids, cu_row_blocks, logit_scale=inv_temp, no_grad=no_grad)
+        o, rem, M, neg_log_acc = sb_fwd(q, k, v, cu_seqlens, sequence_ids, cu_row_blocks, logit_scale=inv_temp, no_grad=no_grad)
         if no_grad:
             M = None
-        ctx.save_for_backward(q, k, v, M, cu_seqlens, sequence_ids, cu_row_blocks, first_row_block)
+        ctx.save_for_backward(q, k, v, M, neg_log_acc, cu_seqlens, sequence_ids, cu_row_blocks, first_row_block)
         ctx.logit_scale = logit_scale
         return o, rem
 
     @staticmethod
     def backward(ctx, do, drem):
         logit_scale = ctx.logit_scale
-        q, k, v, M, cu_seqlens, sequence_ids, cu_row_blocks, first_row_block = ctx.saved_tensors
+        q, k, v, M, neg_log_acc, cu_seqlens, sequence_ids, cu_row_blocks, first_row_block = ctx.saved_tensors
         dq, dk, dv = sb_bwd(
-            do, drem, q, k, v, cu_seqlens, M, sequence_ids, cu_row_blocks, first_row_block, logit_scale
+            do, drem, q, k, v, cu_seqlens, M, neg_log_acc, sequence_ids, cu_row_blocks, first_row_block, logit_scale
         )
         return dq, dk, dv, None, None, None, None, None
 

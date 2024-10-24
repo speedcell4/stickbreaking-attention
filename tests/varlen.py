@@ -60,9 +60,9 @@ def ref_bwd(do, q, k, v, lengths):
 class TestClass:
 
     @pytest.mark.parametrize('batch_size', [2, 4])
-    @pytest.mark.parametrize('num_heads', [1, 2, 4, 8, 7])
-    @pytest.mark.parametrize('head_dim', [50, 16, 32, 64])
-    @pytest.mark.parametrize('length', [512, 1024, 2048, 4096])
+    @pytest.mark.parametrize('num_heads', [8, 1, 2, 4, 7])
+    @pytest.mark.parametrize('head_dim', [64, 16, 32, 50])
+    @pytest.mark.parametrize('length', [4096, 512, 1024, 2048])
     @pytest.mark.parametrize('dtype', [torch.float32])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype):
         torch.set_printoptions(linewidth=1024, edgeitems=500)
@@ -82,11 +82,12 @@ class TestClass:
                                 inv_temp=1 / math.sqrt(q.size(-1)),
                                 zero_start=False)
         o = o + rem[..., None] * v
-        dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
-        torch.cuda.synchronize()
-
         ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
         print("o", (ref_out - o).abs().max())
+
+        torch.cuda.synchronize()
+        dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
+
         print("dq", (ref_dq - dq).abs().max())
         print("dk", (ref_dk - dk).abs().max())
         print("dv", (ref_dv - dv).abs().max())
