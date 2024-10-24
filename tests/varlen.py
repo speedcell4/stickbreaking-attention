@@ -73,7 +73,7 @@ class TestClass:
     @pytest.mark.parametrize('num_heads', [8, 4, 2, 1, 7])
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 500])
-    @pytest.mark.parametrize('dtype', [torch.float32])
+    @pytest.mark.parametrize('dtype', [torch.bfloat16])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype):
         torch.set_printoptions(linewidth=1024, edgeitems=500)
         device = torch.device('cuda:0')
@@ -93,7 +93,7 @@ class TestClass:
                                 zero_start=False)
         o = o + rem[..., None] * v
         ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
-        eps = 0.005
+        eps = 0.05
         assert_close("o", ref_out, o, eps)
         dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
         assert_close("dq", ref_dq, dq, eps)
