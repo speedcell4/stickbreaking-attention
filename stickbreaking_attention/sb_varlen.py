@@ -140,7 +140,8 @@ def _forward(
 ):
 
     head_id = tl.program_id(0)
-    M_block_id = tl.program_id(1)
+    # M_block_id = tl.program_id(1)
+    M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
 
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
@@ -286,7 +287,7 @@ def _backward(
     acc_dtype: tl.constexpr = tl.float32
 ):
     head_id = tl.program_id(0)
-    M_block_id = tl.program_id(1)
+    M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
     N_range = tl.arange(0, BLOCK_N)

@@ -8,6 +8,7 @@ import triton.language as tl
 from flash_attn import flash_attn_varlen_func
 from torch import nn
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, rotate_half
+from transformers import set_seed
 
 
 # for reference
@@ -109,10 +110,12 @@ providers = [
 ])
 def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider):
     device = torch.device('cuda:0')
+    set_seed(1337)
     lengths = torch.randint(length // 2, length, (batch_size,)).to(device=device, dtype=torch.int32)
     total_length = lengths.sum()
     warmup = 100
     rep = 1000
+
     q = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
     k = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
     v = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
