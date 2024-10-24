@@ -134,6 +134,7 @@ def _forward(
     ALLOW_TF32: tl.constexpr = ALLOW_TF32,
     inv_log2: tl.constexpr = inv_log2,
     no_grad: tl.constexpr = False,
+    acc_dtype: tl.constexpr = tl.float64
 ):
 
     head_id = tl.program_id(0)
@@ -175,7 +176,7 @@ def _forward(
         batch_ids = tl.load(batch_ptr + M_blk_idxs, mask=M_mask, other=batch_size)
     start_idxs = tl.load(CSL_ptr + batch_ids - 1, mask=batch_ids > 0, other=0).to(tl.int64)
     first_N_block_id = tl.min(start_idxs) // BLOCK_N
-    neg_log_acc = tl.zeros([BLOCK_M], dtype=tl.float64)
+    neg_log_acc = tl.zeros([BLOCK_M], dtype=acc_dtype)
     acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
     # --- End band vectors ---
     # Iterate only up to start of sequence
@@ -233,7 +234,7 @@ def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_g
         rem = torch.zeros_like(q[:, :, 0], device=q.device)
         neg_log_acc = torch.zeros_like(q[:, :, 0], device=q.device, dtype=torch.float32)
         if no_grad:
-            M = torch.zeros((1, 1, 1), device=q.device, dtype=torch.float64)
+            M = torch.zeros((1, 1, 1), device=q.device, dtype=torch.float32)
         else:
             M = torch.zeros((num_heads, cu_row_blocks[-1], BLOCK_M), device=q.device, dtype=torch.float64)
 
@@ -289,6 +290,7 @@ def _backward(
     BLOCK_D: tl.constexpr,
     inv_log2: tl.constexpr = inv_log2,
     ALLOW_TF32: tl.constexpr = ALLOW_TF32,
+    acc_dtype: tl.constexpr = tl.float64
 ):
     head_id = tl.program_id(0)
     M_block_id = tl.program_id(1)
@@ -342,9 +344,9 @@ def _backward(
     is_same_start = min_start_idxs == tl.max(start_idxs)
     iters = last_N_block_id - first_N_block_id
     N_block_id = first_N_block_id
-    neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask, other=0.0).to(dtype=tl.float64)
+    neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask, other=0.0).to(dtype=acc_dtype)
     for i in range(iters):
-        # neg_log_acc__ = tl.load(M_blk_ptrs)
+        neg_log_acc__ = tl.load(M_blk_ptrs)
 
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
         is_last_block = i == 0
@@ -372,7 +374,7 @@ def _backward(
             backward=True
         )
 
-        # diff = tl.max(tl.where(M_mask, tl.abs(neg_log_acc_ - (neg_log_acc__ + tl.sum(neg_log, axis=1))), 0.))
+        # diff = tl.max(tl.where(M_mask, tl.abs(neg_log_acc - neg_log_acc__ ), 0.))
         # if diff > 1e-4:
         #     tl.device_print("gap!", diff)
  
