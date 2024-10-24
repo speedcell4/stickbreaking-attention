@@ -55,19 +55,23 @@ def compute_attn_weights(
     if MASK:
         neg_log = tl.where(mask, neg_log, 0.0).to(neg_log.dtype)
         if backward:
-            _log_p += neg_log_acc[:, None] - (tl.cumsum(neg_log, axis=1) - neg_log)
+            _log_p += neg_log_acc[:, None] - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
+            # _log_p += neg_log_acc[:, None] - (tl.cumsum(neg_log, axis=1) - neg_log)
             neg_log_acc -= tl.sum(neg_log, axis=1).to(neg_log_acc.dtype)
         else:
-            cu_neg_log = tl.cumsum(neg_log, axis=1, reverse=True) # tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
+            cu_neg_log = tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
+            # cu_neg_log = tl.cumsum(neg_log, axis=1, reverse=True) # tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
             _log_p += cu_neg_log + neg_log_acc[:, None]
         p = tl.math.exp2(_log_p)
         p = tl.where(mask, p, 0.0).to(p.dtype)
     else:
         if backward:
-            _log_p += neg_log_acc[:, None] - (tl.cumsum(neg_log, axis=1) - neg_log)
+            _log_p += neg_log_acc[:, None] - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
+            # _log_p += neg_log_acc[:, None] - (tl.cumsum(neg_log, axis=1) - neg_log)
             neg_log_acc -= tl.sum(neg_log, axis=1).to(neg_log_acc.dtype)
         else:
-            cu_neg_log = tl.cumsum(neg_log, axis=1, reverse=True) # tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
+            cu_neg_log = tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
+            # cu_neg_log = tl.cumsum(neg_log, axis=1, reverse=True) # tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
             _log_p += cu_neg_log + neg_log_acc[:, None]
         p = tl.math.exp2(_log_p)
     return neg_log, p, neg_log_acc
