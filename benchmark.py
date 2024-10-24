@@ -105,13 +105,14 @@ providers = [
         styles=[x[2] for x in providers],
         ylabel="ms",
         plot_name=f"triton v torch",
-        args={"batch_size": 1, "num_heads": 8, "head_dim": 64, "dtype": torch.bfloat16}
+        args={"batch_size": 2, "num_heads": 8, "head_dim": 64, "dtype": torch.bfloat16}
     )
 ])
 def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider):
     device = torch.device('cuda:0')
     set_seed(1337)
     lengths = torch.randint(length // 2, length, (batch_size,)).to(device=device, dtype=torch.int32)
+    print(lengths)
     total_length = lengths.sum()
     warmup = 100
     rep = 1000
@@ -123,7 +124,6 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider):
     k.requires_grad_()
     v.requires_grad_()
     do = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
-    rope = LlamaRotaryEmbedding(dim=head_dim).to(device)
     position_ids = torch.arange(q.size(1), device=device, dtype=torch.int32)[None, :]
 
     if provider== "reference":
@@ -131,6 +131,7 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider):
     elif provider == "triton":
         fun = lambda: tri_fwdbwd(do, q, k, v, lengths)
     elif provider == "flash":
+        rope = LlamaRotaryEmbedding(dim=head_dim).to(device)
         fun = lambda: flash_fwdbwd(rope, position_ids, do, q, k, v, lengths)
 
     return triton.testing.do_bench(fun, warmup=warmup, rep=rep)
