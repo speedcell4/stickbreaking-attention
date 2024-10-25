@@ -177,10 +177,8 @@ def _forward(
     M_mask = M_blk_idxs < token_size
     if NO_M_MASK:
         q = tl.load(Q_blk_ptrs, mask=D_mask[None, :], other=0.)
-        # batch_ids = tl.load(batch_ptr + M_blk_idxs)
     else:
         q = tl.load(Q_blk_ptrs, mask=M_mask[:, None] & D_mask[None, :], other=0.)
-        # batch_ids = tl.load(batch_ptr + M_blk_idxs, mask=M_mask, other=batch_size)
 
     batch_ids = get_batch_ids(CSL_ptr, batch_size, token_size, M_blk_idxs, BLOCK_CSL)
 
