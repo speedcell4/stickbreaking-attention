@@ -375,11 +375,13 @@ def _backward(
         # --- End compute attn stuff ---
 
         # --- Do gradient stuff ---
-        dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
-        att_dA = (p * dA).to(cm.dtype)
-        cumul_att_dA = tl.dot(att_dA, tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
-        dqk = (att_dA - (1 - tl.math.exp2(neg_log.to(tl.float32))) * cumul_att_dA).to(k.dtype)
-        dq += tl.dot(dqk, tl.trans(k), allow_tf32=ALLOW_TF32)
+        att_dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
+        att_dA = (p * att_dA).to(cm.dtype)
+        cumul_att_dA = tl.dot(att_dA.to(cm.dtype), tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+        dqk = att_dA - (1 - tl.math.exp2(neg_log.to(tl.float32))) * cumul_att_dA
+        dqk = dqk.to(k.dtype)
+
+        dq = tl.dot(dqk, tl.trans(k), acc=dq, allow_tf32=ALLOW_TF32)
         grad_prev_acc += tl.sum(att_dA, axis=1)
 
         N_mask = N_blk_idxs < token_size
