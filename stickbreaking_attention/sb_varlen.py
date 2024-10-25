@@ -28,7 +28,7 @@ def row_block_counts_and_sequence_ids(cu_seqlens: torch.Tensor, BLOCK_M: int, BL
 @triton.jit
 def locked_add(Lock_ptr, A_ptrs, a, B_ptrs, b, mask):
     # tl.static_print(Lock_ptr)
-    locked = 1
+    locked = tl.atomic_cas(Lock_ptr, 0, 1)
     while locked == 1:
         locked = tl.atomic_cas(Lock_ptr, 0, 1)
 
@@ -118,7 +118,7 @@ def compute_block(
     return neg_log, p, k, v, neg_log_acc
 
 
-# @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=['batch_size', 'token_size'],)
+@triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 @triton.jit
 def _forward(
     Q_ptr, stride_qh, stride_qm, stride_qd,
@@ -264,6 +264,7 @@ def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_g
         return o, rem, neg_log_acc
 
 
+@triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 @triton.jit
 def _backward(
     DO_ptr, stride_doh, stride_dom, stride_dod,
