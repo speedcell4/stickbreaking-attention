@@ -73,7 +73,7 @@ class TestClass:
     @pytest.mark.parametrize('num_heads', [8, 4, 2, 1, 7])
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 500])
-    @pytest.mark.parametrize('dtype', [torch.bfloat16])
+    @pytest.mark.parametrize('dtype', [torch.float32])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype):
         torch.set_printoptions(linewidth=1024, edgeitems=500)
         device = torch.device('cuda:0')

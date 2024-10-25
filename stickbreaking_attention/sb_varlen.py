@@ -45,34 +45,36 @@ def softplus(x):
 
 @triton.jit
 def compute_attn_weights(
-    q, k, cm, neg_log_acc, qk_scale, mask, MASK: tl.constexpr, ALLOW_TF32: tl.constexpr = ALLOW_TF32,
+    q, k, cm, neg_log_acc, qk_scale, mask,
+    MASK: tl.constexpr,
+    ALLOW_TF32: tl.constexpr = ALLOW_TF32,
     backward: tl.constexpr = False
 ):
     qk = tl.dot(q, k, allow_tf32=ALLOW_TF32)
     qk *= qk_scale
     neg_log = -softplus(qk).to(q.dtype)
-    _log_p = qk
+    _log_p = qk + neg_log_acc[:, None]
     if MASK:
         neg_log = tl.where(mask, neg_log, 0.0).to(neg_log.dtype)
         if backward:
-            _log_p += neg_log_acc[:, None] - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
+            _log_p +=  - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
             # _log_p += neg_log_acc[:, None] - (tl.cumsum(neg_log, axis=1) - neg_log)
-            neg_log_acc -= tl.sum(neg_log, axis=1).to(neg_log_acc.dtype)
+            neg_log_acc -= tl.sum(neg_log, axis=1)
         else:
             cu_neg_log = tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
             # cu_neg_log = tl.cumsum(neg_log, axis=1, reverse=True) # tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
-            _log_p += cu_neg_log + neg_log_acc[:, None]
+            _log_p += cu_neg_log
         p = tl.math.exp2(_log_p)
         p = tl.where(mask, p, 0.0).to(p.dtype)
     else:
         if backward:
-            _log_p += neg_log_acc[:, None] - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
+            _log_p += - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
             # _log_p += neg_log_acc[:, None] - (tl.cumsum(neg_log, axis=1) - neg_log)
-            neg_log_acc -= tl.sum(neg_log, axis=1).to(neg_log_acc.dtype)
+            neg_log_acc -= tl.sum(neg_log, axis=1)
         else:
             cu_neg_log = tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
             # cu_neg_log = tl.cumsum(neg_log, axis=1, reverse=True) # tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32)
-            _log_p += cu_neg_log + neg_log_acc[:, None]
+            _log_p += cu_neg_log
         p = tl.math.exp2(_log_p)
     return neg_log, p, neg_log_acc
 
@@ -125,10 +127,8 @@ def _forward(
     K_ptr, stride_kh, stride_kn, stride_kd,
     V_ptr, stride_vh, stride_vn, stride_vd,
     O_ptr, stride_oh, stride_om, stride_od,
-    CRB_ptr,
     R_ptr, stride_rh, stride_rm,
     A_ptr, stride_ah, stride_am,
-    batch_ptr,
     CSL_ptr,
     logit_scale,
     batch_size,
@@ -175,10 +175,14 @@ def _forward(
     M_mask = M_blk_idxs < token_size
     if NO_M_MASK:
         q = tl.load(Q_blk_ptrs, mask=D_mask[None, :], other=0.)
-        batch_ids = tl.load(batch_ptr + M_blk_idxs)
+        # batch_ids = tl.load(batch_ptr + M_blk_idxs)
     else:
         q = tl.load(Q_blk_ptrs, mask=M_mask[:, None] & D_mask[None, :], other=0.)
-        batch_ids = tl.load(batch_ptr + M_blk_idxs, mask=M_mask, other=batch_size)
+        # batch_ids = tl.load(batch_ptr + M_blk_idxs, mask=M_mask, other=batch_size)
+
+    CSL_range = tl.arange(0, 16)
+    cuseqlens = tl.load(CSL_ptr + CSL_range, mask=CSL_range < batch_size, other=token_size)
+    batch_ids = tl.sum((M_blk_idxs[:, None] >= cuseqlens).to(tl.int32), axis=1)
 
     start_idxs = tl.load(CSL_ptr + batch_ids - 1, mask=batch_ids > 0, other=0)
     first_N_block_id = tl.min(start_idxs) // BLOCK_N
@@ -218,7 +222,7 @@ def _forward(
         )
         # Store intermediate values
 
-        neg_log_acc += tl.sum(neg_log, axis=1).to(acc_dtype)
+        neg_log_acc += tl.sum(neg_log, axis=1)
         acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
 
     tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
@@ -226,7 +230,7 @@ def _forward(
     tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
 
 
-def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_grad=False):
+def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
     with torch.cuda.device(q.device):
         num_heads = q.size(0)
         batch_size = cu_seqlens.size(0)
@@ -240,18 +244,15 @@ def sb_fwd(q, k, v, cu_seqlens, batch_ids, cu_row_blocks, logit_scale=None, no_g
         neg_log_acc = torch.zeros_like(q[:, :, 0], device=q.device, dtype=torch.float32)
 
         M_count = triton.cdiv(token_size, BLOCK_M)
-
         grid = (num_heads, M_count)
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
             k, k.stride(0), k.stride(1), k.stride(2),
             v, v.stride(0), v.stride(1), v.stride(2),
             o, o.stride(0), o.stride(1), o.stride(2),
-            cu_row_blocks,
             rem, rem.stride(0), rem.stride(1),
             neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
-            batch_ids,
-            cu_seqlens,
+            cu_seqlens, 
             logit_scale=logit_scale,
             batch_size=batch_size,
             token_size=token_size,
@@ -458,7 +459,9 @@ class StickBreakingAttention(torch.autograd.Function):
     def forward(ctx, q, k, v, cu_seqlens, cu_row_blocks, first_row_block, sequence_ids, inv_temp):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
-        o, rem, neg_log_acc = sb_fwd(q, k, v, cu_seqlens, sequence_ids, cu_row_blocks, logit_scale=inv_temp, no_grad=no_grad)
+        o, rem, neg_log_acc = sb_fwd(
+            q, k, v, cu_seqlens,
+            logit_scale=inv_temp, no_grad=no_grad)
         if no_grad:
             M = None
         ctx.save_for_backward(q, k, v, neg_log_acc, cu_seqlens, sequence_ids, cu_row_blocks, first_row_block)
