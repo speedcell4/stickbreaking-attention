@@ -201,7 +201,6 @@ def _forward(
 
         on_band = i < BLOCK_M // BLOCK_N
         is_last_block = i == (iters - 1)
-        on_N_edge = on_band and i == 0
         neg_log, p, _, v, _ = compute_block(
             q=q,
             neg_log_acc=neg_log_acc,
