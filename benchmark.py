@@ -66,12 +66,10 @@ def flash_fwdbwd(rope, position_ids, do, q, k, v, lengths):
     cos, sin = rope(v, position_ids)
     q = (q * cos) + (rotate_half(q) * sin)
     k = (k * cos) + (rotate_half(k) * sin)
-
     lengths = lengths.to(torch.int32)
     cu_seqlens = torch.cumsum(lengths, dim=-1)
     cu_seqlens = F.pad(cu_seqlens, (1, 0)).to(torch.int32)
     max_len = torch.max(lengths)
-
     q = q.permute(1, 0, 2)
     k = k.permute(1, 0, 2)
     v = v.permute(1, 0, 2)
@@ -102,7 +100,7 @@ providers = [
         styles=[x[2] for x in providers],
         ylabel="ms",
         plot_name=f"triton v torch",
-        args={"batch_size": 2, "num_heads": 8, "head_dim": 64, "dtype": torch.bfloat16, "bwd": True}
+        args={"batch_size": 2, "num_heads": 8, "head_dim": 64, "dtype": torch.bfloat16, "bwd": False}
     )
 ])
 def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, bwd):
