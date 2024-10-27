@@ -165,8 +165,8 @@ def _forward(
 ):
 
     head_id = tl.program_id(0)
-    M_block_id = tl.program_id(1)
-    # M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
+    # M_block_id = tl.program_id(1)
+    M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
 
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
@@ -203,7 +203,7 @@ def _forward(
             q = tl.load(Q_blk_ptrs, mask=M_mask[:, None], other=0.)
     else:
         q = tl.load(Q_blk_ptrs, mask=M_mask[:, None] & D_mask[None, :], other=0.)
-    q = q.to(acc_dtype)
+    # q = q.to(acc_dtype)
 
     M_batch_ids = get_batch_ids(CSL_ptr, batch_size, token_size, M_blk_idxs, BLOCK_CSL)
     start_idxs = tl.load(CSL_ptr + M_batch_ids - 1, mask=M_batch_ids > 0, other=0)
@@ -236,10 +236,11 @@ def _forward(
         else:
             k = tl.load(K_blk_ptrs, mask=N_mask[:, None] & D_mask[None, :], other=0.0)
             v = tl.load(V_blk_ptrs, mask=N_mask[:, None] & D_mask[None, :], other=0.0)
-        k = k.to(acc_dtype)
-        v = v.to(acc_dtype)
 
         qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
+
+        k = k.to(acc_dtype)
+        v = v.to(acc_dtype)
 
         on_band = i < BLOCK_M // BLOCK_N
         is_last = i == iters - 1
@@ -247,8 +248,8 @@ def _forward(
         neg_log = -softplus(qk)
         log_p = qk + neg_log_acc[:, None]
         if needs_mask:
-            block_mask = N_blk_idxs[None, :] >= start_idxs[:, None]
-            block_mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
+            block_mask = M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
+            block_mask &= N_blk_idxs[None, :] >= start_idxs[:, None]
             neg_log = tl.where(block_mask, neg_log, 0.)
             log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
             p = tl.math.exp2(log_p)
