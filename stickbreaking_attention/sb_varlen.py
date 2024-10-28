@@ -7,11 +7,9 @@ import triton.language as tl
 log2 = math.log(2)
 inv_log2 = 1 / log2
 ALLOW_TF32 = False
-
 # WARNING: does not work when bfloat16 and 64. Triton problem.
 BLOCK_M = 32
 BLOCK_N = 32
-
 
 @triton.jit
 def softplus(x):
@@ -29,7 +27,7 @@ def get_batch_ids(CSL_ptr, batch_size: tl.constexpr, token_size, M_blk_idxs, CSL
 
 @triton.jit
 def load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask,
-            NO_D_MASK: tl.constexpr, NO_N_MASK: tl.constexpr, NO_N_MASK_: tl.constexpr):
+            NO_D_MASK: tl.constexpr, NO_N_MASK: tl.constexpr, NO_N_MASK_):
     if NO_D_MASK:
         if NO_N_MASK or NO_N_MASK_:
             k = tl.load(K_blk_ptrs)
@@ -42,7 +40,6 @@ def load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask,
         k = tl.load(K_blk_ptrs, mask=ND_mask)
         v = tl.load(V_blk_ptrs, mask=ND_mask)
     return k,v
-
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK: tl.constexpr):
@@ -69,8 +66,8 @@ def compute_block(
         M_blk_idxs, N_blk_idxs, start_idxs, 
         cm, on_band,
         needs_mask,
-        backward: tl.constexpr = False,
-        ALLOW_TF32: tl.constexpr = ALLOW_TF32):
+        ALLOW_TF32,
+        backward):
     qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
     log_om_beta = -softplus(qk).to(q.dtype) # log_om_beta: log(1 - \beta)
     if needs_mask:
@@ -93,9 +90,9 @@ def compute_block(
 def get_forward_configs():
     return [
         triton.Config({"GROUP_SIZE": gs}, num_stages=s, num_warps=w) \
-        for s in [1, 3, 4, 7] \
-        for w in [1, 2, 4, 8]
-        for gs in [1, 2, 4, 8, 16, 32, 64]
+        for s in [4]# [1, 3, 4, 7] \
+        for w in [4] # [1, 2, 4, 8]
+        for gs in [1] # [1, 2, 4, 8, 16, 32, 64]
     ]
 @triton.autotune(configs=get_forward_configs(), key=["token_size", "head_size"])
 @triton.jit
@@ -119,12 +116,12 @@ def _forward(
     NO_M_MASK: tl.constexpr,
     NO_N_MASK: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
-    ALLOW_TF32: tl.constexpr = ALLOW_TF32,
-    inv_log2: tl.constexpr = inv_log2,
+    ALLOW_TF32: tl.constexpr,
+    inv_log2: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
-    BLOCK_M: tl.constexpr = BLOCK_M,
-    BLOCK_N: tl.constexpr = BLOCK_N,
 ): 
     pid = tl.program_id(0) 
     num_pids = tl.num_programs(0) 
@@ -190,19 +187,20 @@ def _forward(
         N_blk_idxs -= BLOCK_N
         K_blk_ptrs -= BLOCK_N * stride_kn
         V_blk_ptrs -= BLOCK_N * stride_vn
-        NO_N_MASK_ = (((N_block_id + 1) * BLOCK_N - 1) < token_size)
+        NO_N_MASK_ = ((N_block_id + 1) * BLOCK_N - 1) < token_size
         N_mask = N_blk_idxs < token_size
 
-        k, v = load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask, NO_D_MASK, NO_N_MASK, NO_N_MASK)
+        k, v = load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask, NO_D_MASK, NO_N_MASK, NO_N_MASK_)
 
         on_band = i < BLOCK_M // BLOCK_N
         is_left_edge = i == iters - 1
         needs_mask = (not same_seq) or (on_band or is_left_edge)
 
         p, neg_log_acc = compute_block(
-            q, k, qk_scale, neg_log_acc, 
-            M_blk_idxs, N_blk_idxs, start_idxs, 
-            cm, on_band, needs_mask, ALLOW_TF32
+            q, k, qk_scale, neg_log_acc,
+            M_blk_idxs, N_blk_idxs, start_idxs,
+            cm, on_band, needs_mask, ALLOW_TF32,
+            backward=False
         )
         # Store intermediate values
         acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
@@ -233,11 +231,11 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
         o = torch.zeros_like(q)
         rem = torch.zeros_like(q[:, :, 0], device=q.device)
         neg_log_acc = torch.zeros_like(q[:, :, 0], device=q.device, dtype=torch.float32)
+
         if False:
             W = torch.full((num_heads, token_size, token_size), 0., dtype=torch.float32, device=q.device)
         else:
             W = torch.empty((1, 1, 1), device=q.device)
-
         M_count = triton.cdiv(token_size, BLOCK_M)
         grid = (num_heads * M_count,)
         _forward[grid](
@@ -268,10 +266,18 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
         return o, rem, neg_log_acc
 
 
-
+def get_backward_configs():
+    return [
+        triton.Config({"GROUP_SIZE": gs}, num_stages=s, num_warps=w) \
+        for s in [4]# [1, 3, 4, 7] \
+        for w in [4] # [1, 2, 4, 8]
+        for gs in [1] # [1, 2, 4, 8, 16, 32, 64]
+    ]
+@triton.autotune(configs=get_backward_configs(), key=["token_size", "head_size"])
 @triton.jit
 def _backward(
     DO_ptr, stride_doh, stride_dom, stride_dod,
+    A_ptr, stride_ah, stride_am,
     DR_ptr, stride_drh, stride_drm,
     Q_ptr, stride_qh, stride_qm, stride_qd,
     K_ptr, stride_kh, stride_kn, stride_kd,
@@ -279,39 +285,41 @@ def _backward(
     DQ_ptr, stride_dqh, stride_dqm, stride_dqd,
     DK_ptr, stride_dkh, stride_dkn, stride_dkd,
     DV_ptr, stride_dvh, stride_dvn, stride_dvd,
-    A_ptr, stride_ah, stride_am,
-    L_ptr, stride_lh, stride_lm,
-    C_ptr, stride_ch, stride_cm,
+    KV_Lock_ptr, KV_Count_ptr, stride_kvl,
     CSL_ptr,
     logit_scale,
     batch_size: tl.constexpr,
     token_size,
-    head_size,
+    head_size: tl.constexpr,
     num_heads: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_CSL: tl.constexpr,
     NO_D_MASK: tl.constexpr,
-    inv_log2: tl.constexpr = inv_log2,
-    ALLOW_TF32: tl.constexpr = ALLOW_TF32,
-    acc_dtype: tl.constexpr = tl.float32
+    NO_M_MASK: tl.constexpr,
+    NO_N_MASK: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    inv_log2: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    acc_dtype: tl.constexpr = tl.float32,
 ):
     pid = tl.program_id(0) 
     num_pids = tl.num_programs(0) 
     M_block_count = num_pids // num_heads
     head_id = pid % num_heads
     rev_M_block_id = pid // num_heads
+    head_id, rev_M_block_id = tl.swizzle2d(head_id, rev_M_block_id, num_heads, M_block_count, GROUP_SIZE)
     M_block_id = M_block_count - rev_M_block_id - 1
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
-
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
+    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
     # Start by calculating the output block
+
     M_blk_idxs = M_block_id * BLOCK_M + M_range
     # NO_M_MASK = (M_block_id + 1) * BLOCK_M - 1 < token_size
     M_mask = M_blk_idxs < token_size
@@ -324,8 +332,8 @@ def _backward(
     end_m = (M_block_id + 1) * BLOCK_M
     last_N_block_id = end_m // BLOCK_N
     first_N_block_id = tl.min(start_idxs) // BLOCK_N
-
     N_blk_idxs = first_N_block_id * BLOCK_N + N_range
+
     # Init pointers
     # Inputs
     Q_blk_ptrs = Q_ptr + stride_qh * head_id + stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :]
@@ -366,67 +374,44 @@ def _backward(
 
     # Iterate only up to start of sequence
     min_start_idxs = tl.min(start_idxs)
-    is_same_start = min_start_idxs == tl.max(start_idxs)
+    same_seq = min_start_idxs == tl.max(start_idxs)
     iters = last_N_block_id - first_N_block_id
     N_block_id = first_N_block_id
 
     for i in range(iters):
-        # neg_log_acc__ = tl.load(M_blk_ptrs)
-
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
-        is_last_block = i == 0
-        on_N_edge = on_band and i == iters - 1
+        is_left_edge = i == 0
+        needs_mask = (not same_seq) or (on_band or is_left_edge)
+        N_mask = N_blk_idxs < token_size
+
         # --- Recompute block ---
         k, v = load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask, NO_D_MASK, NO_N_MASK, NO_N_MASK)
-
-        p, block_sum = compute_block( # TODO make sure the backward does correct jumps
-            q, k, qk_scale, neg_log_acc, 
-            M_blk_idxs, N_blk_idxs, start_idxs, 
-            cm, on_band, needs_mask, ALLOW_TF32
+        p, neg_log_acc = compute_block( # TODO make sure the backward does correct jumps
+            q, k, qk_scale, neg_log_acc,
+            M_blk_idxs, N_blk_idxs, start_idxs,
+            cm, on_band, needs_mask, ALLOW_TF32,
+            backward=True
         )
-
         # --- Do gradient stuff ---
         dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
         att_dA = (p * dA).to(cm.dtype)
         cumul_att_dA = tl.dot(att_dA, tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
         grad_prev_acc += tl.sum(att_dA, axis=1)
-
-        # dqk = (
-        #     att_dA - 
-        #     (1 - tl.math.exp2(neg_log.to(tl.float32))) * cumul_att_dA).to(k.dtype)
         dqk = att_dA.to(tl.float32)
-
-        N_batch_ids = get_batch_ids(CSL_ptr, batch_size, token_size, N_blk_idxs, BLOCK_CSL)
         beta = (1 - tl.exp2(neg_log.to(tl.float32)))
         dqk = dqk - beta * cumul_att_dA
-
-        # diff = tl.abs(tl.sum(dqk + beta * 0.01) - tl.sum(dqk_))
-        # if diff != 0.:
-        #     mask = tl.abs((dqk + beta * 0.01) - dqk_) != 0
-            # tl.device_print('p', tl.max(p))
-            # tl.device_print('cumul_att_dA', cumul_att_dA)
-            # tl.device_print('nan places', tl.sum(tl.where(mask, cumul_att_dA, 0.)))
-            # tl.device_print('nan places', tl.sum(tl.where(mask, neg_log, 0.)))
-
-        
-
-        # negbeta = tl.exp2(neg_log.to(tl.float32) - 0.01)
-        # dqk += tl.where(neg_log >= 0, cumul_att_dA, negbeta * cumul_att_dA)
         dq += tl.dot(dqk.to(k.dtype), tl.trans(k), allow_tf32=ALLOW_TF32)
 
-        N_mask = N_blk_idxs < token_size
         block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p.to(do.dtype)), do, allow_tf32=ALLOW_TF32)
-
         locked_add(
-            L_ptr + stride_lh * head_id + N_block_id, 
-            C_ptr + stride_ch * head_id + N_block_id, 
+            KV_Lock_ptr + stride_kvl * head_id + N_block_id,
+            KV_Count_ptr + stride_kvl * head_id + N_block_id,
             DK_blk_ptrs, block_dk,
             DV_blk_ptrs, block_dv,
             mask=N_mask[:, None] & D_mask[None, :],
-            NO_MASK=False # can be further optimised
+            NO_MASK=False # TODO can be further optimised
         )
-
         # --- End gradient stuff ---
 
         N_block_id += 1
@@ -459,27 +444,41 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
         dkdv_lock = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
         _backward[(num_heads * M_count,)](
+            # DO_ptr, stride_doh, stride_dom, stride_dod,
             do, do.stride(0), do.stride(1), do.stride(2),
-            dr, dr.stride(0), dr.stride(1),
-            q, q.stride(0), q.stride(1), q.stride(2),
-            k, k.stride(0), k.stride(1), k.stride(2),
-            v, v.stride(0), v.stride(1), v.stride(2),
-            dq, dq.stride(0), dq.stride(1), dq.stride(2),
-            dk, dk.stride(0), dk.stride(1), dk.stride(2),
-            dv, dv.stride(0), dv.stride(1), dv.stride(2),
+            # A_ptr, stride_ah, stride_am,
             neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
-            dkdv_lock, dkdv_lock.stride(0), dkdv_lock.stride(1),
-            dkdv_count, dkdv_count.stride(0), dkdv_count.stride(1),
+            # DR_ptr, stride_drh, stride_drm,
+            dr, dr.stride(0), dr.stride(1),
+            # Q_ptr, stride_qh, stride_qm, stride_qd,
+            q, q.stride(0), q.stride(1), q.stride(2),
+            # K_ptr, stride_kh, stride_kn, stride_kd,
+            k, k.stride(0), k.stride(1), k.stride(2),
+            # V_ptr, stride_vh, stride_vn, stride_vd,
+            v, v.stride(0), v.stride(1), v.stride(2),
+            # DQ_ptr, stride_dqh, stride_dqm, stride_dqd,
+            dq, dq.stride(0), dq.stride(1), dq.stride(2),
+            # DK_ptr, stride_dkh, stride_dkn, stride_dkd,
+            dk, dk.stride(0), dk.stride(1), dk.stride(2),
+            # DV_ptr, stride_dvh, stride_dvn, stride_dvd,
+            dv, dv.stride(0), dv.stride(1), dv.stride(2),
+            # KV_Lock_ptr, KV_Count_ptr, stride_kvl,
+            dkdv_lock, dkdv_count, dkdv_lock.stride(0),
             cu_seqlens,
             logit_scale=logit_scale,
             batch_size=batch_size,
             token_size=token_size,
             head_size=dim_size,
+            num_heads=num_heads,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_D=BLOCK_D,
             BLOCK_CSL=triton.next_power_of_2(batch_size),
-            NO_D_MASK=BLOCK_D == dim_size 
+            NO_D_MASK=BLOCK_D == dim_size,
+            NO_M_MASK=(token_size % BLOCK_M) == 0,
+            NO_N_MASK=(token_size % BLOCK_N) == 0,
+            ALLOW_TF32=ALLOW_TF32,
+            inv_log2=inv_log2
         )
         # print(dkdv_count)
         return dq, dk, dv
