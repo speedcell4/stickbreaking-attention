@@ -8,12 +8,14 @@ log2: tl.constexpr = math.log(2)
 inv_log2: tl.constexpr = 1 / log2
 ALLOW_TF32: tl.constexpr = True
 DEBUG: tl.constexpr = False
+
+# WARNING: does not work when bfloat16 and 64. Triton problem.
 BLOCK_M: tl.constexpr = 32
 BLOCK_N: tl.constexpr = 32
 
 @triton.jit
 def get_batch_ids(CSL_ptr, batch_size: tl.constexpr, token_size, M_blk_idxs, CSL_BLOCK: tl.constexpr=4):
-    CSL_range = tl.arange(0, batch_size)
+    CSL_range = tl.arange(0, CSL_BLOCK)
     cuseqlens = tl.load(CSL_ptr + CSL_range, mask=CSL_range < batch_size, other=token_size).to(tl.int32)
     batch_ids = tl.sum(tl.where(M_blk_idxs[:, None] >= cuseqlens[None, :], 1., 0.), axis=1).to(tl.int32)
     return batch_ids
@@ -45,99 +47,6 @@ def softplus(x):
     return out
 
 
-@triton.jit
-def compute_attn_weights(
-    q, k, cm, neg_log_acc, qk_scale, mask,
-    MASK: tl.constexpr,
-    ALLOW_TF32: tl.constexpr = ALLOW_TF32,
-    backward: tl.constexpr = False
-):
-    qk = tl.dot(q, k, allow_tf32=ALLOW_TF32)
-    qk *= qk_scale
-    neg_log = -softplus(qk).to(q.dtype)
-    _log_p = qk + neg_log_acc[:, None]
-    if True:
-        neg_log = tl.where(mask, neg_log, 0.).to(neg_log.dtype)
-        if backward:
-            neg_log_acc -= tl.sum(neg_log, axis=1)
-            _log_p = qk + tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None] 
-        else:
-            _log_p = tl.dot(neg_log, cm, acc=_log_p, allow_tf32=ALLOW_TF32)
-        log_p = qk + tl.dot(neg_log, cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
-        p = tl.math.exp2(log_p)
-
-        # p = tl.where(mask, p, 0.0).to(p.dtype)
-
-
-        """
-        if tl.max(p) <= 0.:
-            # tl.device_print('max neg_log_acc', debug_max_neg_log_acc)
-            tl.device_print('q', tl.max(tl.abs(tl.sum(q, axis=0))))
-            tl.device_print('k', tl.max(tl.abs(tl.sum(k, axis=1))))
-            tl.device_print('qk', tl.max(tl.where(mask, tl.abs(qk), 0.).to(tl.float32)))
-            tl.device_print('_log_p', tl.max(tl.where(mask, tl.abs(_log_p), 0.).to(tl.float32)))
-            tl.device_print('neg_log', tl.max(tl.where(mask, tl.abs(neg_log), 0.).to(tl.float32)))
-        """
-    else:
-        if backward:
-            _log_p = qk + neg_log_acc[:, None] - (tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32)  - neg_log)
-            # _log_p += neg_log - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) 
-            # _log_p += - tl.dot(neg_log, tl.trans(cm), allow_tf32=ALLOW_TF32) + neg_log
-            neg_log_acc -= tl.sum(neg_log, axis=1)
-        else:
-            _log_p = tl.dot(neg_log, cm, acc=_log_p, allow_tf32=ALLOW_TF32)
-       
-        p = tl.math.exp2(_log_p)
-            # if backward and tl.max(_log_p) > 0.:
-            # tl.device_print('neg_log_acc', tl.max(neg_log_acc))
-
-
-    return neg_log, p, neg_log_acc
-
-
-@triton.jit
-def compute_block(
-    q,
-    neg_log_acc,
-    min_start_idxs,
-    start_idxs,
-    token_size,
-    cm,
-    qk_scale,
-    K_blk_ptrs,
-    V_blk_ptrs,
-    M_blk_idxs,
-    N_blk_idxs,
-    D_mask,
-    block_mask,
-    CSL_ptr, batch_size, CSL_BLOCK, # TODO: to remove later
-    is_last_block: tl.constexpr,
-    is_same_start: tl.constexpr,
-    on_N_edge: tl.constexpr,
-    on_band: tl.constexpr,
-    NO_D_MASK: tl.constexpr,
-    backward: tl.constexpr = False
-):
-
-    if True: #on_N_edge:
-        N_mask = N_blk_idxs < token_size
-        k = tl.load(K_blk_ptrs, mask=N_mask[None, :] & D_mask[:, None], other=0.0)
-        v = tl.load(V_blk_ptrs, mask=N_mask[:, None] & D_mask[None, :], other=0.0)
-    else:
-        if NO_D_MASK:
-            k = tl.load(K_blk_ptrs)
-            v = tl.load(V_blk_ptrs)
-        else:
-            k = tl.load(K_blk_ptrs, mask=D_mask[:, None])
-            v = tl.load(V_blk_ptrs, mask=D_mask[None, :])
-    # tl.device_print('mask sum', tl.sum(tl.sum(mask.to(tl.int32), axis=1)))
-    mask = start_idxs[:, None] <= N_blk_idxs[None, :]  # sequence boundary
-    if on_band:
-        mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :]  # diagonal boundary
-    neg_log, p, neg_log_acc = compute_attn_weights(q, k, cm, neg_log_acc, qk_scale, block_mask, MASK=True, backward=backward)
-    return neg_log, p, k, v, neg_log_acc
-
-
 # @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 @triton.jit
 def _forward(
@@ -153,20 +62,26 @@ def _forward(
     batch_size: tl.constexpr,
     token_size,
     head_size: tl.constexpr,
+    num_heads: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_CSL: tl.constexpr,
     NO_D_MASK: tl.constexpr,
+    NO_M_MASK: tl.constexpr,
+    NO_N_MASK: tl.constexpr,
     ALLOW_TF32: tl.constexpr = ALLOW_TF32,
     inv_log2: tl.constexpr = inv_log2,
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32
-):
-
-    head_id = tl.program_id(0)
+): 
+    pid = tl.program_id(0) 
+    num_pids = tl.num_programs(0) 
+    M_block_count = num_pids // num_heads
+    head_id = pid % num_heads
+    rev_M_block_id = pid // num_heads
     # M_block_id = tl.program_id(1)
-    M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
+    M_block_id = M_block_count - rev_M_block_id - 1
 
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
@@ -175,12 +90,13 @@ def _forward(
 
     D_mask = D_range < head_size
 
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(acc_dtype)
+    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
     # Loading thread information
     M_blk_idxs = M_block_id * BLOCK_M + M_range, BLOCK_M
     M_mask = M_blk_idxs < token_size
-    NO_M_MASK = ((M_block_id + 1) * BLOCK_M - 1) < token_size
+
+    NO_M_MASK = NO_M_MASK or (((M_block_id + 1) * BLOCK_M - 1) < token_size)
     end_m = (M_block_id + 1) * BLOCK_M
     N_block_id = end_m
     N_blk_idxs = N_block_id + N_range
@@ -222,43 +138,19 @@ def _forward(
         N_blk_idxs -= BLOCK_N
         K_blk_ptrs -= BLOCK_N * stride_kn
         V_blk_ptrs -= BLOCK_N * stride_vn
-
-        NO_N_MASK = ((N_block_id + 1) * BLOCK_N - 1) < token_size
+        NO_N_MASK_ = (((N_block_id + 1) * BLOCK_N - 1) < token_size)
         N_mask = N_blk_idxs < token_size
 
-        if NO_D_MASK:
-            if NO_N_MASK:
-                k = tl.load(K_blk_ptrs)
-                v = tl.load(V_blk_ptrs)
-            else:
-                k = tl.load(K_blk_ptrs, mask=N_mask[:, None], other=0.0)
-                v = tl.load(V_blk_ptrs, mask=N_mask[:, None], other=0.0)
-        else:
-            k = tl.load(K_blk_ptrs, mask=N_mask[:, None] & D_mask[None, :], other=0.0)
-            v = tl.load(V_blk_ptrs, mask=N_mask[:, None] & D_mask[None, :], other=0.0)
-
-        qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
-
-        k = k.to(acc_dtype)
-        v = v.to(acc_dtype)
+        k, v = load_kv(NO_D_MASK, NO_N_MASK, D_mask, K_blk_ptrs, V_blk_ptrs, NO_N_MASK_, N_mask)
 
         on_band = i < BLOCK_M // BLOCK_N
-        is_last = i == iters - 1
-        needs_mask = (not same_seq) or (on_band or is_last)
-        neg_log = -softplus(qk)
-        log_p = qk + neg_log_acc[:, None]
-        if needs_mask:
-            block_mask = M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
-            block_mask &= N_blk_idxs[None, :] >= start_idxs[:, None]
-            neg_log = tl.where(block_mask, neg_log, 0.)
-            log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
-            p = tl.math.exp2(log_p)
-            p = tl.where(block_mask, p, 0.0)
-        else:
-            log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
-            p = tl.math.exp2(log_p)
-
-
+        is_left_edge = i == iters - 1
+        needs_mask = (not same_seq) or (on_band or is_left_edge)
+        p, neg_log_acc = compute_block(
+            q, k, qk_scale, neg_log_acc, 
+            M_blk_idxs, N_blk_idxs, start_idxs, 
+            cm, on_band, needs_mask, ALLOW_TF32
+        )
         if False:
             tl.store(
                 W_ptr + stride_wh * head_id + stride_wm * M_blk_idxs[:, None] + stride_wn * N_blk_idxs[None, :],
@@ -266,12 +158,51 @@ def _forward(
                 mask=(M_blk_idxs < token_size)[:, None] & (N_blk_idxs < token_size)[None, :]
             ) 
         # Store intermediate values
-        neg_log_acc += tl.sum(neg_log, axis=1)
-        acc = tl.dot(p, v, acc, allow_tf32=ALLOW_TF32)
+        acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
        
     tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
     tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
     tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
+
+@triton.jit
+def compute_block(
+        q, k, qk_scale, neg_log_acc, 
+        M_blk_idxs, N_blk_idxs, start_idxs, 
+        cm,
+        on_band, needs_mask: tl.constexpr, ALLOW_TF32: tl.constexpr):
+
+    qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
+    neg_log = -softplus(qk).to(q.dtype)
+    log_p = qk + neg_log_acc[:, None]
+    if needs_mask:
+        block_mask = N_blk_idxs[None, :] >= start_idxs[:, None]
+        if on_band:
+            block_mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
+
+        neg_log = tl.where(block_mask, neg_log, 0.).to(q.dtype)
+        log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
+        p = tl.math.exp2(log_p)
+        p = tl.where(block_mask, p, 0.0)
+    else:
+        log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
+        p = tl.math.exp2(log_p)
+    neg_log_acc += tl.sum(neg_log, axis=1)
+    return p, neg_log_acc
+
+@triton.jit
+def load_kv(NO_D_MASK, NO_N_MASK, D_mask, K_blk_ptrs, V_blk_ptrs, NO_N_MASK_, N_mask):
+    if NO_D_MASK:
+        if NO_N_MASK or NO_N_MASK_:
+            k = tl.load(K_blk_ptrs)
+            v = tl.load(V_blk_ptrs)
+        else:
+            k = tl.load(K_blk_ptrs, mask=N_mask[:, None])
+            v = tl.load(V_blk_ptrs, mask=N_mask[:, None])
+    else:
+        ND_mask = N_mask[:, None] & D_mask[None, :]
+        k = tl.load(K_blk_ptrs, mask=ND_mask)
+        v = tl.load(V_blk_ptrs, mask=ND_mask)
+    return k,v
 
 
 def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
@@ -281,8 +212,10 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
         token_size = q.size(1)
         dim_size = q.size(-1)
         BLOCK_D = triton.next_power_of_2(dim_size)
+
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
+
         o = torch.zeros_like(q)
         rem = torch.zeros_like(q[:, :, 0], device=q.device)
         neg_log_acc = torch.zeros_like(q[:, :, 0], device=q.device, dtype=torch.float32)
@@ -292,7 +225,7 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
             W = torch.empty((1, 1, 1), device=q.device)
 
         M_count = triton.cdiv(token_size, BLOCK_M)
-        grid = (num_heads, M_count)
+        grid = (num_heads * M_count,)
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
             k, k.stride(0), k.stride(1), k.stride(2),
@@ -306,12 +239,15 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
             batch_size=batch_size,
             token_size=token_size,
             head_size=dim_size,
+            num_heads=num_heads,
             no_grad=no_grad,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_D=BLOCK_D,
             BLOCK_CSL=triton.next_power_of_2(batch_size),
-            NO_D_MASK=BLOCK_D == dim_size
+            NO_D_MASK=BLOCK_D == dim_size,
+            NO_M_MASK=(token_size % BLOCK_M) == 0,
+            NO_N_MASK=(token_size % BLOCK_N) == 0,
         )
         return o, rem, neg_log_acc
 
@@ -335,6 +271,7 @@ def _backward(
     batch_size: tl.constexpr,
     token_size,
     head_size,
+    num_heads: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -344,6 +281,8 @@ def _backward(
     ALLOW_TF32: tl.constexpr = ALLOW_TF32,
     acc_dtype: tl.constexpr = tl.float32
 ):
+    pid = tl.program_id(0)
+
     head_id = tl.program_id(0)
     M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
     qk_scale = inv_log2 * logit_scale
@@ -500,7 +439,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
         dv = torch.zeros_like(v)
         dkdv_lock = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
-        _backward[num_heads, M_count](
+        _backward[(num_heads * M_count,)](
             do, do.stride(0), do.stride(1), do.stride(2),
             dr, dr.stride(0), dr.stride(1),
             q, q.stride(0), q.stride(1), q.stride(2),
