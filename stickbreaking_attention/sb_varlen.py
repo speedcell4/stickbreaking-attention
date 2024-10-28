@@ -4,14 +4,21 @@ import triton
 import triton.language as tl
 
 
-log2: tl.constexpr = math.log(2)
-inv_log2: tl.constexpr = 1 / log2
-ALLOW_TF32: tl.constexpr = True
-DEBUG: tl.constexpr = False
+log2 = math.log(2)
+inv_log2 = 1 / log2
+ALLOW_TF32 = False
 
 # WARNING: does not work when bfloat16 and 64. Triton problem.
-BLOCK_M: tl.constexpr = 32
-BLOCK_N: tl.constexpr = 32
+BLOCK_M = 32
+BLOCK_N = 32
+
+
+@triton.jit
+def softplus(x):
+    out = tl.where(x < 15., tl.math.log2(1 + tl.math.exp2(x)), x)
+    # out = tl.maximum(0, x)
+    return out
+
 
 @triton.jit
 def get_batch_ids(CSL_ptr, batch_size: tl.constexpr, token_size, M_blk_idxs, CSL_BLOCK: tl.constexpr=4):
@@ -19,6 +26,23 @@ def get_batch_ids(CSL_ptr, batch_size: tl.constexpr, token_size, M_blk_idxs, CSL
     cuseqlens = tl.load(CSL_ptr + CSL_range, mask=CSL_range < batch_size, other=token_size).to(tl.int32)
     batch_ids = tl.sum(tl.where(M_blk_idxs[:, None] >= cuseqlens[None, :], 1., 0.), axis=1).to(tl.int32)
     return batch_ids
+
+@triton.jit
+def load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask,
+            NO_D_MASK: tl.constexpr, NO_N_MASK: tl.constexpr, NO_N_MASK_: tl.constexpr):
+    if NO_D_MASK:
+        if NO_N_MASK or NO_N_MASK_:
+            k = tl.load(K_blk_ptrs)
+            v = tl.load(V_blk_ptrs)
+        else:
+            k = tl.load(K_blk_ptrs, mask=N_mask[:, None])
+            v = tl.load(V_blk_ptrs, mask=N_mask[:, None])
+    else:
+        ND_mask = N_mask[:, None] & D_mask[None, :]
+        k = tl.load(K_blk_ptrs, mask=ND_mask)
+        v = tl.load(V_blk_ptrs, mask=ND_mask)
+    return k,v
+
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK: tl.constexpr):
@@ -39,15 +63,41 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK: tl.cons
 
     tl.atomic_xchg(Lock_ptr, 0)
 
-
 @triton.jit
-def softplus(x):
-    out = tl.where(x < 15., tl.math.log2(1 + tl.math.exp2(x)), x)
-    # out = tl.maximum(0, x)
-    return out
+def compute_block(
+        q, k, qk_scale, neg_log_acc, 
+        M_blk_idxs, N_blk_idxs, start_idxs, 
+        cm, on_band,
+        needs_mask,
+        backward: tl.constexpr = False,
+        ALLOW_TF32: tl.constexpr = ALLOW_TF32):
+    qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
+    log_om_beta = -softplus(qk).to(q.dtype) # log_om_beta: log(1 - \beta)
+    if needs_mask:
+        block_mask = N_blk_idxs[None, :] >= start_idxs[:, None]
+        if on_band:
+            block_mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
+        log_om_beta = tl.where(block_mask, log_om_beta, 0.).to(q.dtype)
+        log_p = qk + tl.dot(log_om_beta, cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
+        p = tl.math.exp2(log_p)
+        p = tl.where(block_mask, p, 0.0)
+    else:
+        log_p = qk + tl.dot(log_om_beta, cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
+        p = tl.math.exp2(log_p)
+    neg_log_acc += tl.sum(log_om_beta, axis=1)
+    return p, neg_log_acc
 
 
 # @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
+
+def get_forward_configs():
+    return [
+        triton.Config({"GROUP_SIZE": gs}, num_stages=s, num_warps=w) \
+        for s in [1, 3, 4, 7] \
+        for w in [1, 2, 4, 8]
+        for gs in [1, 2, 4, 8, 16, 32, 64]
+    ]
+@triton.autotune(configs=get_forward_configs(), key=["token_size", "head_size"])
 @triton.jit
 def _forward(
     Q_ptr, stride_qh, stride_qm, stride_qd,
@@ -63,23 +113,25 @@ def _forward(
     token_size,
     head_size: tl.constexpr,
     num_heads: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_CSL: tl.constexpr,
     NO_D_MASK: tl.constexpr,
     NO_M_MASK: tl.constexpr,
     NO_N_MASK: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
     ALLOW_TF32: tl.constexpr = ALLOW_TF32,
     inv_log2: tl.constexpr = inv_log2,
     no_grad: tl.constexpr = False,
-    acc_dtype: tl.constexpr = tl.float32
+    acc_dtype: tl.constexpr = tl.float32,
+    BLOCK_M: tl.constexpr = BLOCK_M,
+    BLOCK_N: tl.constexpr = BLOCK_N,
 ): 
     pid = tl.program_id(0) 
     num_pids = tl.num_programs(0) 
     M_block_count = num_pids // num_heads
     head_id = pid % num_heads
     rev_M_block_id = pid // num_heads
+    head_id, rev_M_block_id = tl.swizzle2d(head_id, rev_M_block_id, num_heads, M_block_count, GROUP_SIZE)
     # M_block_id = tl.program_id(1)
     M_block_id = M_block_count - rev_M_block_id - 1
 
@@ -141,68 +193,30 @@ def _forward(
         NO_N_MASK_ = (((N_block_id + 1) * BLOCK_N - 1) < token_size)
         N_mask = N_blk_idxs < token_size
 
-        k, v = load_kv(NO_D_MASK, NO_N_MASK, D_mask, K_blk_ptrs, V_blk_ptrs, NO_N_MASK_, N_mask)
+        k, v = load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask, NO_D_MASK, NO_N_MASK, NO_N_MASK)
 
         on_band = i < BLOCK_M // BLOCK_N
         is_left_edge = i == iters - 1
         needs_mask = (not same_seq) or (on_band or is_left_edge)
+
         p, neg_log_acc = compute_block(
             q, k, qk_scale, neg_log_acc, 
             M_blk_idxs, N_blk_idxs, start_idxs, 
             cm, on_band, needs_mask, ALLOW_TF32
         )
-        if False:
+        # Store intermediate values
+        acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
+ 
+        if False: #TODO write returns_attention_weight
             tl.store(
                 W_ptr + stride_wh * head_id + stride_wm * M_blk_idxs[:, None] + stride_wn * N_blk_idxs[None, :],
                 p, # block_mask.to(tl.float32),
                 mask=(M_blk_idxs < token_size)[:, None] & (N_blk_idxs < token_size)[None, :]
             ) 
-        # Store intermediate values
-        acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
-       
+      
     tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
     tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
     tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
-
-@triton.jit
-def compute_block(
-        q, k, qk_scale, neg_log_acc, 
-        M_blk_idxs, N_blk_idxs, start_idxs, 
-        cm,
-        on_band, needs_mask: tl.constexpr, ALLOW_TF32: tl.constexpr):
-
-    qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
-    neg_log = -softplus(qk).to(q.dtype)
-    log_p = qk + neg_log_acc[:, None]
-    if needs_mask:
-        block_mask = N_blk_idxs[None, :] >= start_idxs[:, None]
-        if on_band:
-            block_mask &= M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
-
-        neg_log = tl.where(block_mask, neg_log, 0.).to(q.dtype)
-        log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
-        p = tl.math.exp2(log_p)
-        p = tl.where(block_mask, p, 0.0)
-    else:
-        log_p = tl.dot(neg_log, cm, acc=log_p, allow_tf32=ALLOW_TF32)
-        p = tl.math.exp2(log_p)
-    neg_log_acc += tl.sum(neg_log, axis=1)
-    return p, neg_log_acc
-
-@triton.jit
-def load_kv(NO_D_MASK, NO_N_MASK, D_mask, K_blk_ptrs, V_blk_ptrs, NO_N_MASK_, N_mask):
-    if NO_D_MASK:
-        if NO_N_MASK or NO_N_MASK_:
-            k = tl.load(K_blk_ptrs)
-            v = tl.load(V_blk_ptrs)
-        else:
-            k = tl.load(K_blk_ptrs, mask=N_mask[:, None])
-            v = tl.load(V_blk_ptrs, mask=N_mask[:, None])
-    else:
-        ND_mask = N_mask[:, None] & D_mask[None, :]
-        k = tl.load(K_blk_ptrs, mask=ND_mask)
-        v = tl.load(V_blk_ptrs, mask=ND_mask)
-    return k,v
 
 
 def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
@@ -241,18 +255,20 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
             head_size=dim_size,
             num_heads=num_heads,
             no_grad=no_grad,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
             BLOCK_D=BLOCK_D,
             BLOCK_CSL=triton.next_power_of_2(batch_size),
             NO_D_MASK=BLOCK_D == dim_size,
             NO_M_MASK=(token_size % BLOCK_M) == 0,
             NO_N_MASK=(token_size % BLOCK_N) == 0,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            ALLOW_TF32=ALLOW_TF32,
+            inv_log2=inv_log2
         )
         return o, rem, neg_log_acc
 
 
-# @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
+
 @triton.jit
 def _backward(
     DO_ptr, stride_doh, stride_dom, stride_dod,
@@ -281,15 +297,20 @@ def _backward(
     ALLOW_TF32: tl.constexpr = ALLOW_TF32,
     acc_dtype: tl.constexpr = tl.float32
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0) 
+    num_pids = tl.num_programs(0) 
+    M_block_count = num_pids // num_heads
+    head_id = pid % num_heads
+    rev_M_block_id = pid // num_heads
+    M_block_id = M_block_count - rev_M_block_id - 1
+    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
-    head_id = tl.program_id(0)
-    M_block_id = tl.num_programs(1) - tl.program_id(1) - 1
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
+
     # Start by calculating the output block
     M_blk_idxs = M_block_id * BLOCK_M + M_range
     # NO_M_MASK = (M_block_id + 1) * BLOCK_M - 1 < token_size
@@ -306,24 +327,39 @@ def _backward(
 
     N_blk_idxs = first_N_block_id * BLOCK_N + N_range
     # Init pointers
+    # Inputs
     Q_blk_ptrs = Q_ptr + stride_qh * head_id + stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :]
-    K_blk_ptrs = K_ptr + stride_kh * head_id + stride_kn * N_blk_idxs[None, :] + stride_kd * D_range[:, None]
+    K_blk_ptrs = K_ptr + stride_kh * head_id + stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :]
     V_blk_ptrs = V_ptr + stride_vh * head_id + stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :]
-
     DO_blk_ptrs = DO_ptr + stride_doh * head_id + stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :]
-
+    A_blk_ptrs = A_ptr + stride_ah * head_id + stride_am * M_blk_idxs
+    # Outputs
     DQ_blk_ptrs = DQ_ptr + stride_dqh * head_id + stride_dqm * M_blk_idxs[:, None] + stride_dqd * D_range[None, :]
     DK_blk_ptrs = DK_ptr + stride_dkh * head_id + stride_dkn * N_blk_idxs[:, None] + stride_dkd * D_range[None, :]
     DV_blk_ptrs = DV_ptr + stride_dvh * head_id + stride_dvn * N_blk_idxs[:, None] + stride_dvd * D_range[None, :]
-
     DR_blk_ptrs = DR_ptr + stride_drh * head_id + stride_drm * M_blk_idxs
-    A_blk_ptrs = A_ptr + stride_ah * head_id + stride_am * M_blk_idxs
 
     # --- Load band vectors ---
-    q = tl.load(Q_blk_ptrs, mask=M_mask[:, None], other=0.0)
-    do = tl.load(DO_blk_ptrs, mask=M_mask[:, None], other=0.0)
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
-    dr = tl.load(DR_blk_ptrs, mask=M_mask, other=0.0)
+    if NO_D_MASK:
+        if NO_M_MASK:
+            q = tl.load(Q_blk_ptrs)
+            do = tl.load(DO_blk_ptrs)
+            dr = tl.load(DR_blk_ptrs)
+            neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask)
+        else:
+            q = tl.load(Q_blk_ptrs, mask=M_mask[:, None])
+            do = tl.load(DO_blk_ptrs, mask=M_mask[:, None])
+            dr = tl.load(DR_blk_ptrs, mask=M_mask)
+            neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask)
+    else:
+        MD_mask = M_mask[:, None] & D_mask[None, :]
+        q = tl.load(Q_blk_ptrs, mask=MD_mask)
+        do = tl.load(DO_blk_ptrs, mask=MD_mask)
+        dr = tl.load(DR_blk_ptrs, mask=M_mask)
+        neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask)
+
+    neg_log_acc = neg_log_acc.to(dtype=acc_dtype)
+
     grad_prev_acc = tl.zeros([BLOCK_M], dtype=tl.float32)
     dq = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
     # --- End band vectors ---
@@ -333,38 +369,21 @@ def _backward(
     is_same_start = min_start_idxs == tl.max(start_idxs)
     iters = last_N_block_id - first_N_block_id
     N_block_id = first_N_block_id
-    neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask, other=0.0).to(dtype=acc_dtype)
+
     for i in range(iters):
         # neg_log_acc__ = tl.load(M_blk_ptrs)
 
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
         is_last_block = i == 0
         on_N_edge = on_band and i == iters - 1
+        # --- Recompute block ---
+        k, v = load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask, NO_D_MASK, NO_N_MASK, NO_N_MASK)
 
-        # neg_log_acc_ = neg_log_acc
-
-        neg_log, p, k, v, neg_log_acc = compute_block(
-            q=q,
-            neg_log_acc=neg_log_acc,
-            min_start_idxs=min_start_idxs,
-            start_idxs=start_idxs,
-            token_size=token_size,
-            cm=cm,
-            qk_scale=qk_scale,
-            K_blk_ptrs=K_blk_ptrs,
-            V_blk_ptrs=V_blk_ptrs,
-            M_blk_idxs=M_blk_idxs,
-            N_blk_idxs=N_blk_idxs,
-            D_mask=D_mask,
-            CSL_ptr=CSL_ptr, batch_size=batch_size, CSL_BLOCK=BLOCK_CSL, # TODO: to remove later
-            is_last_block=is_last_block,
-            is_same_start=is_same_start,
-            on_N_edge=is_same_start,
-            on_band=on_band,
-            NO_D_MASK=NO_D_MASK,
-            backward=True
+        p, block_sum = compute_block( # TODO make sure the backward does correct jumps
+            q, k, qk_scale, neg_log_acc, 
+            M_blk_idxs, N_blk_idxs, start_idxs, 
+            cm, on_band, needs_mask, ALLOW_TF32
         )
-        # --- End compute attn stuff ---
 
         # --- Do gradient stuff ---
         dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
