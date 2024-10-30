@@ -82,10 +82,10 @@ def assert_close(varname, a, b, eps):
 class TestClass:
 
     @pytest.mark.parametrize('batch_size', [4, 2, 1])
-    @pytest.mark.parametrize('num_heads', [8, 4, 2, 1, 7])
+    @pytest.mark.parametrize('num_heads', [24, 8, 4, 2, 1, 7])
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
-    @pytest.mark.parametrize('dtype', [torch.bfloat16])
+    @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
     @pytest.mark.parametrize('forward_only', [False])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
         set_seed(1337)
