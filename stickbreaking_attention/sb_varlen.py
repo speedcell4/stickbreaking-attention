@@ -104,7 +104,7 @@ def compute_block(
 # @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 
 def get_configs():
-    if True:
+    if False:
         return [triton.Config({"GROUP_SIZE": 1}, num_warps=4, num_stages=4)]
     else:
         return [
@@ -125,7 +125,7 @@ def _forward(
     W_ptr, stride_wh, stride_wm, stride_wn,
     CSL_ptr,
     logit_scale,
-    batch_size: tl.constexpr,
+    batch_size,
     token_size,
     head_size: tl.constexpr,
     num_heads: tl.constexpr,
@@ -224,12 +224,12 @@ def _forward(
         # Store intermediate values
         acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
  
-        if False: #TODO write returns_attention_weight
+        if False: # TODO write returns_attention_weight
             tl.store(
                 W_ptr + stride_wh * head_id + stride_wm * M_blk_idxs[:, None] + stride_wn * N_blk_idxs[None, :],
                 p, # block_mask.to(tl.float32),
                 mask=(M_blk_idxs < token_size)[:, None] & (N_blk_idxs < token_size)[None, :]
-            ) 
+            )
       
     tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
     tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
@@ -307,7 +307,7 @@ def _backward(
     KV_Lock_ptr, KV_Count_ptr, stride_kvl,
     CSL_ptr,
     logit_scale,
-    batch_size: tl.constexpr,
+    batch_size,
     token_size,
     head_size: tl.constexpr,
     num_heads: tl.constexpr,
