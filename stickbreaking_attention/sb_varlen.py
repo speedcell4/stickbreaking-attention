@@ -2,11 +2,12 @@ import math
 import torch
 import triton
 import triton.language as tl
+from torch.nn import functional as F
 
 
 log2 = math.log(2)
 inv_log2 = 1 / log2
-ALLOW_TF32 = True
+ALLOW_TF32 = False
 # WARNING: does not work when bfloat16 and 64. Triton problem.
 BLOCK_M = 32
 BLOCK_N = 32
@@ -104,7 +105,7 @@ def compute_block(
 # @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 
 def get_configs():
-    if False:
+    if True:
         return [triton.Config({"GROUP_SIZE": 1}, num_warps=4, num_stages=4)]
     else:
         return [
@@ -123,7 +124,7 @@ def _forward(
     R_ptr, stride_rh, stride_rm,
     A_ptr, stride_ah, stride_am,
     W_ptr, stride_wh, stride_wm, stride_wn,
-    CSL_ptr,
+    CSL_ptr, CPO_ptr,
     logit_scale,
     batch_size,
     token_size,
@@ -142,14 +143,18 @@ def _forward(
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
 ): 
-    pid = tl.program_id(0) 
-    num_pids = tl.num_programs(0) 
-    M_block_count = num_pids // num_heads
-    head_id = pid % num_heads
-    rev_M_block_id = pid // num_heads
-    # head_id, rev_M_block_id = tl.swizzle2d(head_id, rev_M_block_id, num_heads, M_block_count, GROUP_SIZE)
-    # M_block_id = tl.program_id(1)
-    M_block_id = M_block_count - rev_M_block_id - 1
+    head_id = tl.program_id(0)
+    block_id = tl.program_id(1)
+
+    CSL_range = tl.arange(0, BLOCK_CSL)
+    block_offsets = tl.load(CPO_ptr + CSL_range, mask=CSL_range < batch_size, other=tl.num_programs(1))
+    sequence_id = tl.sum((block_id > block_offsets).to(tl.int32), axis=0)
+    if sequence_id == 0:
+        sequence_start_offset = 0
+    else:
+        sequence_start_offset = tl.load(CSL_ptr + sequence_id - 1).to(tl.int32)
+    sequence_block_offset = block_id - tl.load(CPO_ptr + sequence_id)
+    sequence_offset = sequence_start_offset + BLOCK_M * sequence_block_offset
 
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
@@ -159,6 +164,57 @@ def _forward(
     D_mask = D_range < head_size
 
     cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+
+    _forward_one_row(
+        M_block_id, head_id,
+        qk_scale,
+        M_range, N_range,
+        D_range, D_mask, cm,
+        Q_ptr, stride_qh, stride_qm, stride_qd,
+        K_ptr, stride_kh, stride_kn, stride_kd,
+        V_ptr, stride_vh, stride_vn, stride_vd,
+        O_ptr, stride_oh, stride_om, stride_od,
+        R_ptr, stride_rh, stride_rm,
+        A_ptr, stride_ah, stride_am,
+        W_ptr, stride_wh, stride_wm, stride_wn,
+        CSL_ptr,
+        batch_size,
+        token_size,
+        BLOCK_D, BLOCK_CSL,
+        NO_D_MASK, NO_M_MASK, NO_N_MASK,
+        ALLOW_TF32,
+        BLOCK_M, BLOCK_N,
+        no_grad, acc_dtype,
+    )
+
+@triton.jit
+def _forward_one_row(
+    M_block_id, head_id,
+    qk_scale,
+    M_range,
+    N_range,
+    D_range, D_mask, cm,
+    Q_ptr, stride_qh, stride_qm, stride_qd,
+    K_ptr, stride_kh, stride_kn, stride_kd,
+    V_ptr, stride_vh, stride_vn, stride_vd,
+    O_ptr, stride_oh, stride_om, stride_od,
+    R_ptr, stride_rh, stride_rm,
+    A_ptr, stride_ah, stride_am,
+    W_ptr, stride_wh, stride_wm, stride_wn,
+    CSL_ptr,
+    batch_size,
+    token_size,
+    BLOCK_D: tl.constexpr,
+    BLOCK_CSL: tl.constexpr,
+    NO_D_MASK: tl.constexpr,
+    NO_M_MASK: tl.constexpr,
+    NO_N_MASK: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    no_grad: tl.constexpr = False,
+    acc_dtype: tl.constexpr = tl.float32,
+): 
 
     # Loading thread information
     M_blk_idxs = M_block_id * BLOCK_M + M_range, BLOCK_M
@@ -230,10 +286,17 @@ def _forward(
                 p, # block_mask.to(tl.float32),
                 mask=(M_blk_idxs < token_size)[:, None] & (N_blk_idxs < token_size)[None, :]
             )
-      
     tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
     tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
     tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
+
+def calculate_programs_needed(cu_seqlens: torch.Tensor):
+    lens = cu_seqlens.clone()
+    lens[1:] -= cu_seqlens[:-1]
+    seq_num_programs = ((lens - 1) // BLOCK_M) + 1 
+    seq_program_offsets = torch.cumsum(seq_num_programs, dim=0)
+    return seq_program_offsets
+
 
 
 def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
@@ -251,12 +314,14 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
         rem = torch.zeros_like(q[:, :, 0], device=q.device)
         neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
 
+
         if False:
             W = torch.full((num_heads, token_size, token_size), 0., dtype=torch.float32, device=q.device)
         else:
             W = torch.empty((1, 1, 1), device=q.device)
-        M_count = triton.cdiv(token_size, BLOCK_M)
-        grid = (num_heads * M_count,)
+
+        seq_program_offsets = calculate_programs_needed(cu_seqlens)
+        grid = (num_heads, seq_program_offsets[-1])
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
             k, k.stride(0), k.stride(1), k.stride(2),
@@ -265,7 +330,7 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False):
             rem, rem.stride(0), rem.stride(1),
             neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
             W, W.stride(0), W.stride(1), W.stride(2),
-            cu_seqlens, 
+            cu_seqlens, seq_program_offsets,
             logit_scale=logit_scale,
             batch_size=batch_size,
             token_size=token_size,
@@ -494,7 +559,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
             dv, dv.stride(0), dv.stride(1), dv.stride(2),
             # KV_Lock_ptr, KV_Count_ptr, stride_kvl,
             dkdv_lock, dkdv_count, dkdv_lock.stride(0),
-            cu_seqlens,
+            cu_seqlens, 
             logit_scale=logit_scale,
             batch_size=batch_size,
             token_size=token_size,
@@ -547,6 +612,7 @@ def sb_attn_varlen(q, k, v, cu_seqlens, inv_temp=None, zero_start=True):
         inv_temp = 1 / math.sqrt(q.size(-1))
     # with torch.no_grad():
     #     cu_row_blocks, first_row_block, sequence_ids = row_block_counts_and_sequence_ids(cu_seqlens, BLOCK_M, BLOCK_N)
+
     return sb_attn_varlen_(q, k, v, inv_temp, cu_seqlens)
 
 
