@@ -63,9 +63,6 @@ def assert_close(varname, a, b, eps):
         print("Reference is nan")
         return 
     diff = (a - b).abs()
-    from matplotlib import pyplot as plt
-    plt.imshow(diff.float().detach().cpu().numpy()[0], interpolation='none')
-    plt.savefig('diff.png')
 
     max_diff= diff.max()
     if max_diff < eps:
@@ -85,8 +82,8 @@ class TestClass:
     @pytest.mark.parametrize('num_heads', [24, 8, 4, 2, 1, 7])
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
-    @pytest.mark.parametrize('dtype', [torch.float32])
-    @pytest.mark.parametrize('forward_only', [False])
+    @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize('forward_only', [True])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
         set_seed(1337)
         torch.set_printoptions(linewidth=110, edgeitems=30)
@@ -95,9 +92,9 @@ class TestClass:
         print(lengths)
         total_length = lengths.sum()
         cu_seqlens = torch.cumsum(lengths, dim=-1)
-        q = 0.5 * torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) - 0.5
-        k = 0.5 * torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) + 0.5
-        v = 0.5 * torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32)
+        q = torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) + 0.75
+        k = torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) - 0.75
+        v = torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32)
         print(q.max(), k.max(), v.max())
         q = q.to(dtype)
         k = k.to(dtype)
@@ -121,4 +118,5 @@ class TestClass:
             assert_close("dq", ref_dq, dq, eps)
             assert_close("dk", ref_dk, dk, eps)
             assert_close("dv", ref_dv, dv, eps)
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
