@@ -25,11 +25,11 @@ def stickbreaking(q, k, v, mask, cum_weight):
     return att @ v, 1 - att.sum(dim=-1)
 
 
-def ref_fwd(q, k, v, lengths):
+def ref_fwd(q, k, v, lengths, attend_current=False):
     splits = list(lengths.cpu().numpy())
     max_len = max(splits)
     cm = torch.ones(max_len, max_len).tril(-1).to(q)
-    mask = torch.ones(max_len, max_len).triu(0).cuda().bool()
+    mask = torch.ones(max_len, max_len).triu(0 if not attend_current else 1).cuda().bool()
     outputs = []
     for q_chunk, k_chunk, v_chunk in zip(q.split(splits, 1), k.split(splits, 1), v.split(splits, 1)):
         len = q_chunk.size(1)

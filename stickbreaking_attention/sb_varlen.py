@@ -121,7 +121,6 @@ def _forward(
     O_ptr, stride_oh, stride_om, stride_od,
     R_ptr, stride_rh, stride_rm,
     A_ptr, stride_ah, stride_am,
-    return_attention: tl.constexpr,
     W_ptr, stride_wh, stride_wm, stride_wn,
     CSL_ptr, CPO_ptr,
     logit_scale: tl.constexpr,
@@ -142,6 +141,7 @@ def _forward(
     Debug_ptr,
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
+    return_attention: tl.constexpr = False,
 ): 
     head_id = tl.program_id(0)
     block_id = tl.program_id(1)
@@ -323,7 +323,6 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
             o, o.stride(0), o.stride(1), o.stride(2),
             rem, rem.stride(0), rem.stride(1),
             neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
-            return_attention,
             W, W.stride(0), W.stride(1), W.stride(2),
             cu_seqlens, seq_program_offsets,
             logit_scale=logit_scale,
@@ -341,7 +340,8 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
             BLOCK_N=BLOCK_N,
             Debug_ptr=debug,
             ALLOW_TF32=ALLOW_TF32,
-            inv_log2=inv_log2
+            inv_log2=inv_log2,
+            return_attention=return_attention,
         )
         # from matplotlib import pyplot as plt
         # plt.figure(dpi=200)
