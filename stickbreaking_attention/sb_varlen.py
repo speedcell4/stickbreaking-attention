@@ -102,6 +102,24 @@ def compute_block(
 
 # @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 
+@triton.jit
+def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
+                       batch_size: tl.constexpr, BLOCK_CSL: tl.constexpr, BLOCK_M: tl.constexpr):
+    CSL_range = tl.arange(0, BLOCK_CSL)
+    block_offsets = tl.load(CPO_ptr + CSL_range, mask=CSL_range < batch_size, other=tl.num_programs(1))
+    sequence_id = tl.sum((block_id >= block_offsets).to(tl.int32), axis=0) # lookup sequence in batch
+    if sequence_id == 0:
+        sequence_start_offset = 0
+        block_start_offset = 0
+    else:
+        sequence_start_offset = tl.load(CSL_ptr + sequence_id - 1).to(tl.int32)
+        block_start_offset = tl.load(CPO_ptr + sequence_id - 1).to(tl.int32)
+    sequence_end_offset = tl.load(CSL_ptr + sequence_id).to(tl.int32)
+    block_offset = block_id - block_start_offset
+    sequence_block_start_offset = sequence_start_offset + BLOCK_M * block_offset
+    return sequence_start_offset,sequence_end_offset,sequence_block_start_offset
+
+
 def get_configs():
     if True:
         return [triton.Config({"GROUP_SIZE": 1}, num_warps=4, num_stages=4)]
@@ -146,28 +164,17 @@ def _forward(
     head_id = tl.program_id(0)
     block_id = tl.program_id(1)
 
-    CSL_range = tl.arange(0, BLOCK_CSL)
-    block_offsets = tl.load(CPO_ptr + CSL_range, mask=CSL_range < batch_size, other=tl.num_programs(1))
-    sequence_id = tl.sum((block_id >= block_offsets).to(tl.int32), axis=0) # lookup sequence in batch
-    if sequence_id == 0:
-        sequence_start_offset = 0
-        block_start_offset = 0
-    else:
-        sequence_start_offset = tl.load(CSL_ptr + sequence_id - 1).to(tl.int32)
-        block_start_offset = tl.load(CPO_ptr + sequence_id - 1).to(tl.int32)
-    sequence_end_offset = tl.load(CSL_ptr + sequence_id).to(tl.int32)
+    sequence_start_offset, sequence_end_offset, sequence_block_start_offset = \
+        compute_boundaries(block_id, CSL_ptr, CPO_ptr, batch_size, BLOCK_CSL, BLOCK_M)
 
-    block_offset = block_id - block_start_offset
-    sequence_block_start_offset = sequence_start_offset + BLOCK_M * block_offset
-    # sequence_length = sequence_end_offset - sequence_start_offset
-    # tl.store(Debug_ptr + block_id, sequence_length)
-
+    # Universal stuff
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
     cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0) # .to(Q_ptr.type.element_ty)
+
 
     _forward_one_row(
         head_id, sequence_block_start_offset,
@@ -285,15 +292,7 @@ def _forward_one_row(
         tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
 
-def calculate_programs_needed(cu_seqlens: torch.Tensor):
-    lens = cu_seqlens.clone()
-    lens[1:] -= cu_seqlens[:-1]
-    seq_num_programs = ((lens - 1) // BLOCK_M) + 1 
-    seq_program_offsets = torch.cumsum(seq_num_programs, dim=0)
-    return seq_program_offsets
-
-
-def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attention=False):
+def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale=None, no_grad=False, return_attention=False):
     with torch.cuda.device(q.device):
         num_heads = q.size(0)
         batch_size = cu_seqlens.size(0)
@@ -313,7 +312,6 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
         else:
             W = torch.empty((1, 1, 1), device=q.device)
 
-        seq_program_offsets = calculate_programs_needed(cu_seqlens)
         debug = torch.zeros((seq_program_offsets[-1],), dtype=torch.int32, device=q.device)
         grid = (num_heads, seq_program_offsets[-1])
         _forward[grid](
@@ -391,6 +389,21 @@ def _backward(
     BLOCK_N: tl.constexpr,
     acc_dtype: tl.constexpr = tl.float32,
 ):
+    head_id = tl.program_id(0)
+    block_id = tl.program_id(1)
+
+    sequence_start_offset, sequence_end_offset, sequence_block_start_offset = \
+        compute_boundaries(block_id, CSL_ptr, CPO_ptr, batch_size, BLOCK_CSL, BLOCK_M)
+
+    # Universal stuff
+    qk_scale = inv_log2 * logit_scale
+    M_range = tl.arange(0, BLOCK_M)
+    N_range = tl.arange(0, BLOCK_N)
+    D_range = tl.arange(0, BLOCK_D)
+    D_mask = D_range < head_size
+    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0) # .to(Q_ptr.type.element_ty)
+
+
     pid = tl.program_id(0) 
     num_pids = tl.num_programs(0) 
     M_block_count = num_pids // num_heads
@@ -583,24 +596,35 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
         return dq, dk, dv
 
 
+def calculate_programs_needed(cu_seqlens: torch.Tensor):
+    lens = cu_seqlens.clone()
+    lens[1:] -= cu_seqlens[:-1]
+    seq_num_programs = ((lens - 1) // BLOCK_M) + 1 
+    seq_program_offsets = torch.cumsum(seq_num_programs, dim=0)
+    return seq_program_offsets
+
+
 class StickBreakingAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens, inv_temp):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
+
+        seq_program_offsets = calculate_programs_needed(cu_seqlens)
         o, rem, neg_log_acc = sb_fwd(
             q, k, v, cu_seqlens,
+            seq_program_offsets,
             logit_scale=inv_temp,
             no_grad=no_grad
         )
-        ctx.save_for_backward(q, k, v, neg_log_acc, cu_seqlens)
+        ctx.save_for_backward(q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets)
         ctx.logit_scale = logit_scale
         return o, rem
 
     @staticmethod
     def backward(ctx, do, drem):
         logit_scale = ctx.logit_scale
-        q, k, v, neg_log_acc, cu_seqlens = ctx.saved_tensors
+        q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets = ctx.saved_tensors
         dq, dk, dv = sb_bwd(
             do, drem, q, k, v, cu_seqlens, neg_log_acc, logit_scale
         )
@@ -613,8 +637,6 @@ def sb_attn_varlen(q, k, v, cu_seqlens, inv_temp=None, zero_start=True):
         cu_seqlens = cu_seqlens[1:]
     if inv_temp is None:
         inv_temp = 1 / math.sqrt(q.size(-1))
-    # with torch.no_grad():
-    #     cu_row_blocks, first_row_block, sequence_ids = row_block_counts_and_sequence_ids(cu_seqlens, BLOCK_M, BLOCK_N)
 
     return sb_attn_varlen_(q, k, v, inv_temp, cu_seqlens)
 
