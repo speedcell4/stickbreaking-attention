@@ -117,7 +117,7 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
     sequence_end_offset = tl.load(CSL_ptr + sequence_id).to(tl.int32)
     block_offset = block_id - block_start_offset
     sequence_block_start_offset = sequence_start_offset + BLOCK_M * block_offset
-    return sequence_start_offset,sequence_end_offset,sequence_block_start_offset
+    return sequence_start_offset, sequence_end_offset, sequence_block_start_offset
 
 
 def get_configs():
@@ -371,7 +371,7 @@ def _backward(
     DK_ptr, stride_dkh, stride_dkn, stride_dkd,
     DV_ptr, stride_dvh, stride_dvn, stride_dvd,
     KV_Lock_ptr, KV_Count_ptr, stride_kvl,
-    CSL_ptr,
+    CSL_ptr, CPO_ptr,
     logit_scale,
     batch_size,
     token_size,
@@ -404,36 +404,84 @@ def _backward(
     cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0) # .to(Q_ptr.type.element_ty)
 
 
-    pid = tl.program_id(0) 
-    num_pids = tl.num_programs(0) 
-    M_block_count = num_pids // num_heads
-    head_id = pid % num_heads
-    rev_M_block_id = pid // num_heads
-    head_id, rev_M_block_id = tl.swizzle2d(head_id, rev_M_block_id, num_heads, M_block_count, GROUP_SIZE)
 
-    M_block_id = M_block_count - rev_M_block_id - 1
-    qk_scale = inv_log2 * logit_scale
-    M_range = tl.arange(0, BLOCK_M)
-    N_range = tl.arange(0, BLOCK_N)
-    D_range = tl.arange(0, BLOCK_D)
-    D_mask = D_range < head_size
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+    _backward_one_row(
+        head_id, sequence_block_start_offset,
+        sequence_start_offset, sequence_end_offset,
+        qk_scale,
+        M_range,
+        N_range,
+        D_range, D_mask, cm,
+        DO_ptr, stride_doh, stride_dom, stride_dod,
+        DR_ptr, stride_drh, stride_drm,
+        A_ptr, stride_ah, stride_am,
+        Q_ptr, stride_qh, stride_qm, stride_qd,
+        K_ptr, stride_kh, stride_kn, stride_kd,
+        V_ptr, stride_vh, stride_vn, stride_vd,
+        DQ_ptr, stride_dqh, stride_dqm, stride_dqd,
+        DK_ptr, stride_dkh, stride_dkn, stride_dkd,
+        DV_ptr, stride_dvh, stride_dvn, stride_dvd,
+        KV_Lock_ptr, KV_Count_ptr, stride_kvl,
+        CSL_ptr, CPO_ptr,
+        logit_scale,
+        batch_size,
+        token_size,
+        head_size,
+        num_heads,
+        BLOCK_D,
+        BLOCK_CSL,
+        NO_D_MASK,
+        NO_M_MASK,
+        NO_N_MASK,
+        GROUP_SIZE,
+        ALLOW_TF32,
+        inv_log2,
+        BLOCK_M,
+        BLOCK_N,
+        acc_dtype,
+    )
 
-    # Start by calculating the output block
+def _backward_one_row(
+    head_id, sequence_block_start_offset,
+    sequence_start_offset, sequence_end_offset,
+    qk_scale,
+    M_range,
+    N_range,
+    D_range, D_mask, cm,
+    DO_ptr, stride_doh, stride_dom, stride_dod,
+    DR_ptr, stride_drh, stride_drm,
+    A_ptr, stride_ah, stride_am,
+    Q_ptr, stride_qh, stride_qm, stride_qd,
+    K_ptr, stride_kh, stride_kn, stride_kd,
+    V_ptr, stride_vh, stride_vn, stride_vd,
+    DQ_ptr, stride_dqh, stride_dqm, stride_dqd,
+    DK_ptr, stride_dkh, stride_dkn, stride_dkd,
+    DV_ptr, stride_dvh, stride_dvn, stride_dvd,
+    KV_Lock_ptr, KV_Count_ptr, stride_kvl,
+    CSL_ptr, CPO_ptr,
+    logit_scale,
+    batch_size,
+    head_size: tl.constexpr,
+    num_heads: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_CSL: tl.constexpr,
+    NO_D_MASK: tl.constexpr,
+    NO_M_MASK: tl.constexpr,
+    NO_N_MASK: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    inv_log2: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    acc_dtype: tl.constexpr = tl.float32,
+):
+    # Loading thread information
+    M_blk_idxs = sequence_block_start_offset + M_range
+    M_mask = M_blk_idxs < sequence_end_offset
+    NO_M_MASK = ((sequence_block_start_offset + BLOCK_M - 1) < sequence_end_offset)
 
-    M_blk_idxs = M_block_id * BLOCK_M + M_range
-    NO_M_MASK = NO_M_MASK or (M_block_id + 1) * BLOCK_M - 1 < token_size
-    M_mask = M_blk_idxs < token_size
-    # Load all sequence boundaries
-    batch_ids = get_batch_ids(CSL_ptr, batch_size, token_size, M_blk_idxs, BLOCK_CSL)
-    # Loading important thread information
-    start_idxs = tl.load(CSL_ptr + batch_ids - 1, mask=batch_ids > 0, other=0) # .to(tl.int32)
-
-    # M_start_idx = tl.load(CRB_ptr + M_block_id - 1, mask=M_block_id > 0, other=0)
-    end_m = (M_block_id + 1) * BLOCK_M
-    last_N_block_id = end_m // BLOCK_N
-    first_N_block_id = tl.min(start_idxs) // BLOCK_N
-    N_blk_idxs = first_N_block_id * BLOCK_N + N_range
+    N_blk_idxs = N_range
+    N_blk_idxs_end = sequence_block_start_offset + BLOCK_M # BLOCK_M must be a multiple of BLOCK_N
 
     # Init pointers
     # Inputs
@@ -466,29 +514,27 @@ def _backward(
         do = tl.load(DO_blk_ptrs, mask=MD_mask)
         dr = tl.load(DR_blk_ptrs, mask=M_mask)
         neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask)
-
     # Init accumulators
     neg_log_acc = neg_log_acc.to(dtype=acc_dtype)
-    grad_prev_acc = tl.zeros([BLOCK_M], dtype=tl.float32)
-    dq = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+    grad_prev_acc = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    dq = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
     # --- End band vectors ---
 
-    # Iterate only up to start of sequence
-    min_start_idxs = tl.min(start_idxs)
-    same_seq = min_start_idxs == tl.max(start_idxs)
-    iters = last_N_block_id - first_N_block_id
-    N_block_id = first_N_block_id
 
+    iters = tl.cdiv(N_blk_idxs_end - sequence_start_offset, BLOCK_N)
+    # Iterate only up to start of sequence
+    N_blk_idxs_start = sequence_start_offset
     for i in range(iters):
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
-        is_left_edge = i == 0
-        needs_mask = (not same_seq) or (on_band or is_left_edge)
-        N_mask = N_blk_idxs < token_size
-
-        NO_N_MASK_ = ((N_block_id + 1) * BLOCK_N - 1) < token_size
+        N_mask = N_blk_idxs < sequence_end_offset
 
         # --- Recompute block ---
-        k, v = load_kv(K_blk_ptrs, V_blk_ptrs, D_mask, N_mask, NO_D_MASK, NO_N_MASK, NO_N_MASK_)
+        k, v = load_kv(
+            K_blk_ptrs, V_blk_ptrs,
+            N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
+            D_mask=D_mask, NO_D_MASK=NO_D_MASK
+        )
+
         p, log_om_beta, neg_log_acc = compute_block( # TODO make sure the backward does correct jumps
             q, k, qk_scale, neg_log_acc,
             M_blk_idxs, N_blk_idxs, start_idxs,
@@ -499,29 +545,27 @@ def _backward(
             neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
 
         # --- Do gradient stuff ---
-        if tl.max(p) > 0:
+        dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
+        att_dA = (p * dA).to(cm.dtype)
+        cumul_att_dA = tl.dot(att_dA, tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+        grad_prev_acc += tl.sum(att_dA, axis=1)
+        beta = (1 - tl.exp2(log_om_beta.to(tl.float32)))
+        dqk = att_dA - beta * cumul_att_dA
+        # tl.static_print("dqk", dqk)
 
-            dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
-            att_dA = (p * dA).to(cm.dtype)
-            cumul_att_dA = tl.dot(att_dA, tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
-            grad_prev_acc += tl.sum(att_dA, axis=1)
-            beta = (1 - tl.exp2(log_om_beta.to(tl.float32)))
-            dqk = att_dA - beta * cumul_att_dA
-            # tl.static_print("dqk", dqk)
+        block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
+        block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
+        locked_add(
+            KV_Lock_ptr + stride_kvl * head_id + N_block_id,
+            KV_Count_ptr + stride_kvl * head_id + N_block_id,
+            DK_blk_ptrs, block_dk,
+            DV_blk_ptrs, block_dv,
+            mask=N_mask[:, None] & D_mask[None, :],
+            NO_MASK_=NO_N_MASK_ and NO_D_MASK,
+            NO_MASK=NO_N_MASK and NO_D_MASK # static masking
+        )
 
-            block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
-            block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
-            locked_add(
-                KV_Lock_ptr + stride_kvl * head_id + N_block_id,
-                KV_Count_ptr + stride_kvl * head_id + N_block_id,
-                DK_blk_ptrs, block_dk,
-                DV_blk_ptrs, block_dv,
-                mask=N_mask[:, None] & D_mask[None, :],
-                NO_MASK_=NO_N_MASK_ and NO_D_MASK,
-                NO_MASK=NO_N_MASK and NO_D_MASK # static masking
-            )
-
-            dq += tl.dot(dqk.to(k.dtype), k, allow_tf32=ALLOW_TF32)
+        dq += tl.dot(dqk.to(k.dtype), k, allow_tf32=ALLOW_TF32)
         # --- End gradient stuff ---
 
         N_block_id += 1
@@ -535,7 +579,7 @@ def _backward(
 
 
 
-def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
+def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale=None):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)
         num_heads = q.size(0)
@@ -551,10 +595,12 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
-        dkdv_lock = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
-        dkdv_count = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
 
-        _backward[(num_heads * M_count,)](
+        M_count = seq_program_offsets[-1]
+        N_count = total_M * (BLOCK_M // BLOCK_N)
+        dkdv_lock = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
+        dkdv_count = torch.zeros((num_heads, N_count), dtype=torch.int32, device=q.device)
+        _backward[num_heads, M_count](
             # DO_ptr, stride_doh, stride_dom, stride_dod,
             do, do.stride(0), do.stride(1), do.stride(2),
             # DR_ptr, stride_drh, stride_drm,
@@ -575,7 +621,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, neg_log_acc, logit_scale=None):
             dv, dv.stride(0), dv.stride(1), dv.stride(2),
             # KV_Lock_ptr, KV_Count_ptr, stride_kvl,
             dkdv_lock, dkdv_count, dkdv_lock.stride(0),
-            cu_seqlens, 
+            cu_seqlens, seq_program_offsets,
             logit_scale=logit_scale,
             batch_size=batch_size,
             token_size=token_size,
@@ -626,7 +672,7 @@ class StickBreakingAttention(torch.autograd.Function):
         logit_scale = ctx.logit_scale
         q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets = ctx.saved_tensors
         dq, dk, dv = sb_bwd(
-            do, drem, q, k, v, cu_seqlens, neg_log_acc, logit_scale
+            do, drem, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale
         )
         return dq, dk, dv, None, None
 
