@@ -61,7 +61,8 @@ def ref_bwd(do, q, k, v, lengths):
 def assert_close(varname, a, b, eps):
     if torch.isnan(a).any():
         print("Reference is nan")
-        return 
+        return
+    assert not torch.isnan(b).any()
     diff = (a - b).abs()
 
     max_diff= diff.max()
@@ -82,7 +83,7 @@ class TestClass:
     @pytest.mark.parametrize('num_heads', [24, 8, 4, 2, 1, 7])
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
-    @pytest.mark.parametrize('dtype', [torch.float32])
+    @pytest.mark.parametrize('dtype', [torch.bfloat16])
     @pytest.mark.parametrize('forward_only', [False])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
         set_seed(1337)
@@ -92,9 +93,9 @@ class TestClass:
         print(lengths)
         total_length = lengths.sum()
         cu_seqlens = torch.cumsum(lengths, dim=-1)
-        q = torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) + 0.75
-        k = torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) - 0.75
-        v = torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32)
+        v = 0.25 * torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32)
+        q = 0.25 * (torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) + 1) 
+        k = 0.25 * (torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) - 1)
         print(q.max(), k.max(), v.max())
         q = q.to(dtype)
         k = k.to(dtype)
@@ -108,12 +109,12 @@ class TestClass:
                                 inv_temp=1 / math.sqrt(q.size(-1)),
                                 zero_start=False)
         o = o + rem[..., None] * v
-        torch.cuda.synchronize()
         ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
         eps = 0.05
+        torch.cuda.synchronize()
         assert_close("o", ref_out, o, eps)
         if not forward_only:
             dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
             assert_close("dq", ref_dq, dq, eps)
-            # assert_close("dk", ref_dk, dk, eps)
-            # assert_close("dv", ref_dv, dv, eps)
+            assert_close("dk", ref_dk, dk, eps)
+            assert_close("dv", ref_dv, dv, eps)
