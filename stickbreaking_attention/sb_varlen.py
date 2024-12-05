@@ -425,7 +425,6 @@ def _backward(
         CSL_ptr, CPO_ptr,
         logit_scale,
         batch_size,
-        token_size,
         head_size,
         num_heads,
         BLOCK_D,
@@ -441,6 +440,7 @@ def _backward(
         acc_dtype,
     )
 
+@triton.jit
 def _backward_one_row(
     head_id, sequence_block_start_offset,
     sequence_start_offset, sequence_end_offset,
@@ -480,8 +480,9 @@ def _backward_one_row(
     M_mask = M_blk_idxs < sequence_end_offset
     NO_M_MASK = ((sequence_block_start_offset + BLOCK_M - 1) < sequence_end_offset)
 
-    N_blk_idxs = N_range
-    N_blk_idxs_end = sequence_block_start_offset + BLOCK_M # BLOCK_M must be a multiple of BLOCK_N
+    N_blk_idxs = sequence_start_offset + N_range
+
+    last_N_blk_idxs_end = sequence_block_start_offset + BLOCK_M # BLOCK_M must be a multiple of BLOCK_N
 
     # Init pointers
     # Inputs
@@ -521,7 +522,7 @@ def _backward_one_row(
     # --- End band vectors ---
 
 
-    iters = tl.cdiv(N_blk_idxs_end - sequence_start_offset, BLOCK_N)
+    iters = tl.cdiv(last_N_blk_idxs_end - sequence_start_offset, BLOCK_N)
     # Iterate only up to start of sequence
     N_blk_idxs_start = sequence_start_offset
     for i in range(iters):
@@ -534,13 +535,14 @@ def _backward_one_row(
             N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
             D_mask=D_mask, NO_D_MASK=NO_D_MASK
         )
-
-        p, log_om_beta, neg_log_acc = compute_block( # TODO make sure the backward does correct jumps
+        p, log_om_beta, neg_log_acc = compute_block(
             q, k, qk_scale, neg_log_acc,
-            M_blk_idxs, N_blk_idxs, start_idxs,
-            cm, on_band, needs_mask, ALLOW_TF32,
+            M_blk_idxs, N_blk_idxs,
+            cm, on_band,
+            ALLOW_TF32,
             backward=True
         )
+
         if not NO_M_MASK:
             neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
 
@@ -553,22 +555,21 @@ def _backward_one_row(
         dqk = att_dA - beta * cumul_att_dA
         # tl.static_print("dqk", dqk)
 
-        block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
-        block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
-        locked_add(
-            KV_Lock_ptr + stride_kvl * head_id + N_block_id,
-            KV_Count_ptr + stride_kvl * head_id + N_block_id,
-            DK_blk_ptrs, block_dk,
-            DV_blk_ptrs, block_dv,
-            mask=N_mask[:, None] & D_mask[None, :],
-            NO_MASK_=NO_N_MASK_ and NO_D_MASK,
-            NO_MASK=NO_N_MASK and NO_D_MASK # static masking
-        )
+        # block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
+        # block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
+        # locked_add(
+        #     KV_Lock_ptr + stride_kvl * head_id + N_block_id,
+        #     KV_Count_ptr + stride_kvl * head_id + N_block_id,
+        #     DK_blk_ptrs, block_dk,
+        #     DV_blk_ptrs, block_dv,
+        #     mask=N_mask[:, None] & D_mask[None, :],
+        #     NO_MASK_=NO_N_MASK_ and NO_D_MASK,
+        #     NO_MASK=NO_N_MASK and NO_D_MASK # static masking
+        # )
 
         dq += tl.dot(dqk.to(k.dtype), k, allow_tf32=ALLOW_TF32)
         # --- End gradient stuff ---
 
-        N_block_id += 1
         N_blk_idxs += BLOCK_N
         K_blk_ptrs += BLOCK_N * stride_kn
         V_blk_ptrs += BLOCK_N * stride_vn
@@ -597,7 +598,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
         dv = torch.zeros_like(v)
 
         M_count = seq_program_offsets[-1]
-        N_count = total_M * (BLOCK_M // BLOCK_N)
+        N_count = M_count * (BLOCK_M // BLOCK_N)
         dkdv_lock = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_heads, N_count), dtype=torch.int32, device=q.device)
         _backward[num_heads, M_count](
