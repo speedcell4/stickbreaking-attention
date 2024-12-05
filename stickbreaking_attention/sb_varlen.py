@@ -371,6 +371,7 @@ def _backward(
     DK_ptr, stride_dkh, stride_dkn, stride_dkd,
     DV_ptr, stride_dvh, stride_dvn, stride_dvd,
     KV_Lock_ptr, KV_Count_ptr, stride_kvl,
+    W_ptr, stride_Wh, stride_Wm, stride_Wn,
     CSL_ptr, CPO_ptr,
     logit_scale,
     batch_size,
@@ -422,6 +423,7 @@ def _backward(
         DK_ptr, stride_dkh, stride_dkn, stride_dkd,
         DV_ptr, stride_dvh, stride_dvn, stride_dvd,
         KV_Lock_ptr, KV_Count_ptr, stride_kvl,
+        W_ptr, stride_Wh, stride_Wm, stride_Wn,
         CSL_ptr, CPO_ptr,
         logit_scale,
         batch_size,
@@ -458,6 +460,7 @@ def _backward_one_row(
     DK_ptr, stride_dkh, stride_dkn, stride_dkd,
     DV_ptr, stride_dvh, stride_dvn, stride_dvd,
     KV_Lock_ptr, KV_Count_ptr, stride_kvl,
+    W_ptr, stride_Wh, stride_Wm, stride_Wn,
     CSL_ptr, CPO_ptr,
     logit_scale,
     batch_size,
@@ -542,6 +545,17 @@ def _backward_one_row(
             ALLOW_TF32,
             backward=True
         )
+        
+        tl.store(
+            W_ptr + stride_Wh * head_id +
+            stride_Wm * (sequence_block_start_offset + M_range[:, None]) +
+            stride_Wn * (N_blk_idxs_start + N_range[None, :]),
+            tl.where(p > 0, 1, 0),
+            mask=(
+                ((sequence_block_start_offset + M_range) < sequence_end_offset)[:, None] &
+                (((N_blk_idxs_start + N_range) < sequence_end_offset))[None, :]
+            )
+        )
 
         if not NO_M_MASK:
             neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
@@ -571,6 +585,7 @@ def _backward_one_row(
         # --- End gradient stuff ---
 
         N_blk_idxs += BLOCK_N
+        N_blk_idxs_start += BLOCK_N
         K_blk_ptrs += BLOCK_N * stride_kn
         V_blk_ptrs += BLOCK_N * stride_vn
         DK_blk_ptrs += BLOCK_N * stride_dkn
@@ -601,6 +616,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
         N_count = M_count * (BLOCK_M // BLOCK_N)
         dkdv_lock = torch.zeros((num_heads, M_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_heads, N_count), dtype=torch.int32, device=q.device)
+        W = torch.zeros((num_heads, token_size, token_size), dtype=q.dtype, device=q.device) - 1
         _backward[num_heads, M_count](
             # DO_ptr, stride_doh, stride_dom, stride_dod,
             do, do.stride(0), do.stride(1), do.stride(2),
@@ -622,6 +638,7 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
             dv, dv.stride(0), dv.stride(1), dv.stride(2),
             # KV_Lock_ptr, KV_Count_ptr, stride_kvl,
             dkdv_lock, dkdv_count, dkdv_lock.stride(0),
+            W, W.stride(0), W.stride(1), W.stride(2),
             cu_seqlens, seq_program_offsets,
             logit_scale=logit_scale,
             batch_size=batch_size,
@@ -638,8 +655,10 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2
         )
-        # print("dkdv_count")
-        # print(dkdv_count[0])
+        from matplotlib import pyplot as plt
+        plt.figure(dpi=500)
+        plt.imshow(W[0].cpu(), interpolation='none')
+        plt.savefig('attn.png')
         return dq, dk, dv
 
 
