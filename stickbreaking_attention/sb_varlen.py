@@ -94,7 +94,7 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
 
 def get_configs():
     return [
-        triton.Config({"GROUP_SIZE": 1}, num_stages=s, num_warps=w)
+        triton.Config({}, num_stages=s, num_warps=w)
         for s in [4]
         for w in [4]
     ]
@@ -119,7 +119,6 @@ def _forward(
     NO_D_MASK: tl.constexpr,
     NO_M_MASK: tl.constexpr,
     NO_N_MASK: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     inv_log2: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -278,7 +277,7 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
 
-        o = torch.zeros_like(q)
+        o = torch.empty_like(q)
         rem = torch.zeros_like(q[:, :, 0], device=q.device)
         neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
 
@@ -314,10 +313,6 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
             inv_log2=inv_log2,
             return_attention=return_attention,
         )
-        # from matplotlib import pyplot as plt
-        # plt.figure(dpi=200)
-        # plt.imshow(W[0, 1980:1989 +100, 1980:1989 +100].cpu(), vmax=0.1)
-        # plt.savefig("attn.png")
         if return_attention:
             return o, rem, neg_log_acc, seq_program_offsets, W
         else:
@@ -392,7 +387,6 @@ def _backward(
     NO_D_MASK: tl.constexpr,
     NO_M_MASK: tl.constexpr,
     NO_N_MASK: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     inv_log2: tl.constexpr,
     BLOCK_M: tl.constexpr,
