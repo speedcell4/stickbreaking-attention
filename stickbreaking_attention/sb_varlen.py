@@ -124,7 +124,6 @@ def _forward(
     inv_log2: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    Debug_ptr,
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
@@ -288,7 +287,6 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
         else:
             W = torch.empty((1, 1, 1), device=q.device)
 
-        debug = torch.zeros((seq_program_offsets[-1],), dtype=torch.int32, device=q.device)
         grid = (num_heads, seq_program_offsets[-1])
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
@@ -312,7 +310,6 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
             NO_N_MASK=(token_size % BLOCK_N) == 0,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
-            Debug_ptr=debug,
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2,
             return_attention=return_attention,
