@@ -46,7 +46,7 @@ def ref_fwd(q, k, v, lengths):
             mask[:len, :len], cm[:len, :len]
         )
 
-        o = o + rem[..., None] * v_chunk[None]
+        # o = o + rem[..., None] * v_chunk[None]
         outputs.append(o[0])
     return torch.cat(outputs, 1)
 
@@ -59,7 +59,7 @@ def tri_fwdbwd(do, q, k, v, lengths):
     o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
                             inv_temp=1 / math.sqrt(q.size(-1)),
                             zero_start=False)
-    o = o + rem[..., None] * v
+    # o = o + rem[..., None] * v
     return o
 
 def flash_fwdbwd(rope, position_ids, do, q, k, v, lengths):
@@ -130,7 +130,7 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, b
     if bwd:
         def fun_():
             o = fun()
-            dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
+            # dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
         return triton.testing.do_bench(fun_, warmup=warmup, rep=rep)
     else:
         return triton.testing.do_bench(fun, warmup=warmup, rep=rep)

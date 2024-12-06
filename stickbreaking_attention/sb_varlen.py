@@ -7,7 +7,7 @@ from torch.nn import functional as F
 
 log2 = math.log(2)
 inv_log2 = 1 / log2
-ALLOW_TF32 = False
+ALLOW_TF32 = True
 # WARNING: does not work when bfloat16 and 64. Triton problem.
 BLOCK_M = 64
 BLOCK_N = 64
@@ -33,38 +33,12 @@ def load_kv(K_blk_ptrs, V_blk_ptrs,
         ND_mask = N_mask[:, None] & D_mask[None, :]
         k = tl.load(K_blk_ptrs, mask=ND_mask)
         v = tl.load(V_blk_ptrs, mask=ND_mask)
-    return k,v
+    return k, v
 
-@triton.jit
-def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK):
-    # tl.static_print(Lock_ptr)
-    locked = tl.atomic_cas(Lock_ptr, 0, 1)
-    while locked == 1:
-        locked = tl.atomic_cas(Lock_ptr, 0, 1)
-
-    count = tl.load(Count_ptr)
-    if NO_MASK:
-        if count == 0:
-            tl.store(A_ptrs, a)
-            tl.store(B_ptrs, b)
-            tl.store(Count_ptr, count + 1)
-        else:
-            tl.store(A_ptrs, a + tl.load(A_ptrs))
-            tl.store(B_ptrs, b + tl.load(B_ptrs))
-    else:
-        if count == 0:
-            tl.store(A_ptrs, a, mask=mask)
-            tl.store(B_ptrs, b, mask=mask)
-            tl.store(Count_ptr, count + 1)
-        else:
-            tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
-            tl.store(B_ptrs, b + tl.load(B_ptrs, mask=mask), mask=mask)
-
-    tl.atomic_xchg(Lock_ptr, 0)
 
 @triton.jit
 def compute_block(
-        q, k, qk_scale, neg_log_acc, 
+        q, kT, qk_scale, neg_log_acc, 
         M_blk_idxs, N_blk_idxs,
         cm, on_band,
         ALLOW_TF32: tl.constexpr,
@@ -79,13 +53,13 @@ def compute_block(
         log_om_beta = tl.where(block_mask, log_om_beta, 0.)
         if backward:
             neg_log_acc -= tl.sum(log_om_beta, axis=1)
-        log_p = qk + tl.dot(log_om_beta.to(q.dtype), cm.to(q.dtype), allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
+        log_p = qk + tl.dot(log_om_beta.to(q.dtype), cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
         p = tl.math.exp2(log_p)
         p = tl.where(block_mask, p, 0.0)
     else:
         if backward:
             neg_log_acc -= tl.sum(log_om_beta, axis=1)
-        log_p = qk + tl.dot(log_om_beta.to(q.dtype), cm.to(q.dtype), allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
+        log_p = qk + tl.dot(log_om_beta.to(q.dtype), cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
         p = tl.math.exp2(log_p)
     if not backward:
         neg_log_acc += tl.sum(log_om_beta, axis=1)
@@ -114,7 +88,7 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
 
 def get_configs():
     if True:
-        return [triton.Config({"GROUP_SIZE": 1}, num_warps=4, num_stages=4)]
+        return [triton.Config({"GROUP_SIZE": 1}, num_stages=4, num_warps=4)]
     else:
         return [
             triton.Config({"GROUP_SIZE": g}, num_stages=s, num_warps=w)
@@ -165,7 +139,7 @@ def _forward(
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0) # .to(Q_ptr.type.element_ty)
+    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
 
     _forward_one_row(
@@ -241,7 +215,7 @@ def _forward_one_row(
     else:
         q = tl.load(Q_blk_ptrs, mask=M_mask[:, None] & D_mask[None, :], other=0.)
 
-    q = q.to(acc_dtype)
+    # q = q.to(acc_dtype)
 
     iters = (N_blk_idxs_start - sequence_start_offset) // BLOCK_N
     neg_log_acc = tl.zeros([BLOCK_M], dtype=acc_dtype)
@@ -258,7 +232,7 @@ def _forward_one_row(
         k, v = load_kv(K_blk_ptrs, V_blk_ptrs,
                        N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
                        D_mask=D_mask, NO_D_MASK=NO_D_MASK)
-        k = k.to(acc_dtype)
+        # k = k.to(acc_dtype)
         on_band = i < BLOCK_M // BLOCK_N
         p, _, neg_log_acc = compute_block(
             q, k, qk_scale, neg_log_acc,
@@ -343,11 +317,33 @@ def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale=None, no_grad=F
             return o, rem, neg_log_acc
 
 
-def init_to_zero(names):
-    def fun(nargs):
-        for n in names:
-            nargs[n].zero_()
-    return fun
+
+@triton.jit
+def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK):
+    # tl.static_print(Lock_ptr)
+    locked = tl.atomic_cas(Lock_ptr, 0, 1)
+    while locked == 1:
+        locked = tl.atomic_cas(Lock_ptr, 0, 1)
+
+    count = tl.load(Count_ptr)
+    if NO_MASK:
+        if count == 0:
+            tl.store(A_ptrs, a)
+            tl.store(B_ptrs, b)
+            tl.store(Count_ptr, 1)
+        else:
+            tl.store(A_ptrs, a + tl.load(A_ptrs))
+            tl.store(B_ptrs, b + tl.load(B_ptrs))
+    else:
+        if count == 0:
+            tl.store(A_ptrs, a, mask=mask)
+            tl.store(B_ptrs, b, mask=mask)
+            tl.store(Count_ptr, 1)
+        else:
+            tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
+            tl.store(B_ptrs, b + tl.load(B_ptrs, mask=mask), mask=mask)
+
+    tl.atomic_xchg(Lock_ptr, 0)
     
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"], 
                  reset_to_zero=["DK_ptr", "DV_ptr"])
@@ -535,10 +531,9 @@ def _backward_one_row(
             ALLOW_TF32,
             backward=True
         )
-        p = tl.where(M_mask[:, None], p, 0.)
-        log_om_beta = tl.where(M_mask[:, None], log_om_beta, 0.)
+        # p = tl.where(M_mask[:, None], p, 0.)
+        # log_om_beta = tl.where(M_mask[:, None], log_om_beta, 0.)
         neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
-
 
         # --- Do gradient stuff ---
         dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
@@ -557,20 +552,7 @@ def _backward_one_row(
             mask=N_mask[:, None] & D_mask[None, :],
             NO_MASK=(not on_band) and NO_D_MASK # static masking
         )
-
-        dq += tl.dot(dqk.to(k.dtype), k, allow_tf32=ALLOW_TF32)
-        # tl.store(
-        #     W_ptr + stride_Wh * head_id +
-        #     stride_Wm * (sequence_block_start_offset + M_range[:, None]) +
-        #     stride_Wn * (N_blk_idxs_start + N_range[None, :]),
-        #     dqk,
-        #     mask=(
-        #         ((sequence_block_start_offset + M_range) < sequence_end_offset)[:, None] &
-        #         (((N_blk_idxs_start + N_range) < sequence_end_offset))[None, :]
-        #     )
-        # )
-
-
+        dq = tl.dot(dqk.to(k.dtype), k, acc=dq, allow_tf32=ALLOW_TF32)
         # --- End gradient stuff ---
 
         N_blk_idxs += BLOCK_N
