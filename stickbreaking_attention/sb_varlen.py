@@ -9,8 +9,7 @@ log2 = math.log(2)
 inv_log2 = 1 / log2
 ALLOW_TF32 = True
 # WARNING: does not work when bfloat16 and 64. Triton problem.
-BLOCK_M = 64
-BLOCK_N = 64
+
 
 @triton.jit
 def softplus(x):
@@ -41,7 +40,8 @@ def compute_block(
         M_blk_idxs, N_blk_idxs,
         cm, on_band,
         ALLOW_TF32: tl.constexpr,
-        backward: tl.constexpr):
+        backward: tl.constexpr,
+        use_cumsum: tl.constexpr = False):
 
     qk = tl.dot(q, kT, allow_tf32=ALLOW_TF32) * qk_scale
 
@@ -52,13 +52,24 @@ def compute_block(
         log_om_beta = tl.where(block_mask, log_om_beta, 0.)
         if backward:
             neg_log_acc -= tl.sum(log_om_beta, axis=1)
-        log_p = qk + tl.dot(log_om_beta.to(q.dtype), cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
+        log_p = qk + neg_log_acc[:, None]
+
+        if use_cumsum:
+            log_p += tl.cumsum(log_om_beta, axis=1, reverse=True)
+        else:
+            log_p = tl.dot(log_om_beta.to(q.dtype), cm, acc=log_p, allow_tf32=ALLOW_TF32)
+
         p = tl.math.exp2(log_p)
         p = tl.where(block_mask, p, 0.0)
     else:
         if backward:
             neg_log_acc -= tl.sum(log_om_beta, axis=1)
-        log_p = qk + tl.dot(log_om_beta.to(q.dtype), cm, allow_tf32=ALLOW_TF32) + neg_log_acc[:, None]
+        log_p = qk + neg_log_acc[:, None]
+        if use_cumsum:
+            log_p += tl.cumsum(log_om_beta, axis=1, reverse=True)
+        else:
+            log_p = tl.dot(log_om_beta.to(q.dtype), cm, acc=log_p, allow_tf32=ALLOW_TF32)
+
         p = tl.math.exp2(log_p)
     if not backward:
         neg_log_acc += tl.sum(log_om_beta, axis=1)
@@ -86,15 +97,11 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
 
 
 def get_configs():
-    if True:
-        return [triton.Config({"GROUP_SIZE": 1}, num_stages=4, num_warps=4)]
-    else:
-        return [
-            triton.Config({"GROUP_SIZE": g}, num_stages=s, num_warps=w)
-            for s in [1, 3, 4, 7]
-            for w in [1, 2, 4, 8]
-            for g in [1, 2, 4, 8, 16, 32, 64]
-        ]
+    return [
+        triton.Config({"GROUP_SIZE": 1}, num_stages=s, num_warps=w)
+        for s in [4]
+        for w in [4]
+    ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"])
 @triton.jit
 def _forward(
@@ -230,7 +237,8 @@ def _forward_one_row(
         kT, v = load_kv(
             KT_blk_ptrs, V_blk_ptrs,
             N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
-            D_mask=D_mask, NO_D_MASK=NO_D_MASK)
+            D_mask=D_mask, NO_D_MASK=NO_D_MASK
+        )
         # k = k.to(acc_dtype)
         on_band = i < BLOCK_M // BLOCK_N
         p, _, neg_log_acc = compute_block(
@@ -248,22 +256,29 @@ def _forward_one_row(
                 p,
                 mask=(M_blk_idxs < sequence_end_offset)[:, None] & (N_blk_idxs < sequence_end_offset)[None, :]
             )
-
-    tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
-    tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
+    if NO_M_MASK:
+        tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc))
+        tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty))
+    else:
+        tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
+        tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
     if NO_D_MASK:
         tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None])
     else:
         tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
 
-def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale=None, no_grad=False, return_attention=False):
+def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attention=False):
     with torch.cuda.device(q.device):
         num_heads = q.size(0)
         batch_size = cu_seqlens.size(0)
         token_size = q.size(1)
         dim_size = q.size(-1)
+        BLOCK_M = 64
+        BLOCK_N = 32
         BLOCK_D = triton.next_power_of_2(dim_size)
+
+        seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
 
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
@@ -311,9 +326,9 @@ def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale=None, no_grad=F
         # plt.imshow(W[0, 1980:1989 +100, 1980:1989 +100].cpu(), vmax=0.1)
         # plt.savefig("attn.png")
         if return_attention:
-            return o, rem, neg_log_acc, W
+            return o, rem, neg_log_acc, seq_program_offsets, W
         else:
-            return o, rem, neg_log_acc
+            return o, rem, neg_log_acc, seq_program_offsets
 
 
 
@@ -573,6 +588,9 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
         dim_size = q.size(-1)
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
+
+        BLOCK_M = 64
+        BLOCK_N = 64
         BLOCK_D = triton.next_power_of_2(dim_size)
         # BLOCK_BATCH = triton.next_power_of_2(batch_size)
         M_count = triton.cdiv(token_size, BLOCK_M)
@@ -637,10 +655,10 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
         return dq, dk, dv
 
 
-def calculate_programs_needed(cu_seqlens: torch.Tensor):
+def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
     lens = cu_seqlens.clone()
     lens[1:] -= cu_seqlens[:-1]
-    seq_num_programs = ((lens - 1) // BLOCK_M) + 1 
+    seq_num_programs = ((lens - 1) // BLOCK_SIZE) + 1 
     seq_program_offsets = torch.cumsum(seq_num_programs, dim=0)
     return seq_program_offsets
 
@@ -651,10 +669,8 @@ class StickBreakingAttention(torch.autograd.Function):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
 
-        seq_program_offsets = calculate_programs_needed(cu_seqlens)
-        o, rem, neg_log_acc = sb_fwd(
+        o, rem, neg_log_acc, seq_program_offsets = sb_fwd(
             q, k, v, cu_seqlens,
-            seq_program_offsets,
             logit_scale=inv_temp,
             no_grad=no_grad
         )
