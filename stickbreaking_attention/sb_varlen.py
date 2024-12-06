@@ -8,7 +8,6 @@ from torch.nn import functional as F
 log2 = math.log(2)
 inv_log2 = 1 / log2
 ALLOW_TF32 = True
-# WARNING: does not work when bfloat16 and 64. Triton problem.
 
 
 @triton.jit
@@ -55,7 +54,7 @@ def compute_block(
         log_p = qk + neg_log_acc[:, None]
 
         if use_cumsum:
-            log_p += tl.cumsum(log_om_beta, axis=1, reverse=True)
+            log_p += tl.cumsum(log_om_beta.to(q.dtype), axis=1, reverse=True)
         else:
             log_p = tl.dot(log_om_beta.to(q.dtype), cm, acc=log_p, allow_tf32=ALLOW_TF32)
 
@@ -66,7 +65,7 @@ def compute_block(
             neg_log_acc -= tl.sum(log_om_beta, axis=1)
         log_p = qk + neg_log_acc[:, None]
         if use_cumsum:
-            log_p += tl.cumsum(log_om_beta, axis=1, reverse=True)
+            log_p += tl.cumsum(log_om_beta.to(q.dtype), axis=1, reverse=True)
         else:
             log_p = tl.dot(log_om_beta.to(q.dtype), cm, acc=log_p, allow_tf32=ALLOW_TF32)
 
@@ -76,7 +75,6 @@ def compute_block(
     return p, log_om_beta, neg_log_acc
 
 
-# @triton.autotune(configs=[triton.Config({}, num_stages=4, num_warps=4)], key=[],)
 
 @triton.jit
 def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
@@ -393,7 +391,7 @@ def _backward(
     acc_dtype: tl.constexpr = tl.float32,
 ):
     head_id = tl.program_id(0)
-    block_id = tl.program_id(1)
+    block_id = tl.num_programs(1) - tl.program_id(1) - 1
 
     sequence_start_offset, sequence_end_offset, sequence_block_start_offset, block_start_offset = \
         compute_boundaries(block_id, CSL_ptr, CPO_ptr, batch_size, BLOCK_CSL, BLOCK_M)
@@ -404,7 +402,7 @@ def _backward(
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0) # .to(Q_ptr.type.element_ty)
+    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
     num_N_per_M = BLOCK_M // BLOCK_N
 
@@ -479,7 +477,7 @@ def _backward_one_row(
     # Init pointers
     # Inputs
     Q_blk_ptrs = Q_ptr + stride_qh * head_id + stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :]
-    K_blk_ptrs = K_ptr + stride_kh * head_id + stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :]
+    KT_blk_ptrs = K_ptr + stride_kh * head_id + stride_kn * N_blk_idxs[None, :] + stride_kd * D_range[:, None]
     V_blk_ptrs = V_ptr + stride_vh * head_id + stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :]
     DO_blk_ptrs = DO_ptr + stride_doh * head_id + stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :]
     A_blk_ptrs = A_ptr + stride_ah * head_id + stride_am * M_blk_idxs
@@ -521,41 +519,41 @@ def _backward_one_row(
 
 
     iters = (last_N_blk_idxs_end - sequence_start_offset) // BLOCK_N # always multiple of number of blocks.
-    if (last_N_blk_idxs_end - sequence_start_offset) % BLOCK_N > 0:
-        tl.device_print('remainder')
+    # if (last_N_blk_idxs_end - sequence_start_offset) % BLOCK_N > 0:
+    #     tl.device_print('remainder')
     # Iterate only up to start of sequence
     for i in range(iters):
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
         N_mask = N_blk_idxs < sequence_end_offset
-
-        if (N_blk_idxs_start + BLOCK_N - 1) != tl.max(N_blk_idxs):
-            tl.device_print('N_blk_idxs_end', (N_blk_idxs_start + BLOCK_N - 1),  tl.max(N_blk_idxs))
-
         # --- Recompute block ---
-        k, v = load_kv(
-            K_blk_ptrs, V_blk_ptrs,
-            N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
+        kT, v = load_kv(
+            KT_blk_ptrs, V_blk_ptrs,
+            # N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
+            N_mask=N_mask, NO_N_MASK=False,
             D_mask=D_mask, NO_D_MASK=NO_D_MASK
         )
 
         p, log_om_beta, neg_log_acc = compute_block(
-            q, k, qk_scale, neg_log_acc,
+            q, kT, qk_scale, neg_log_acc,
             M_blk_idxs, N_blk_idxs,
             cm, on_band,
             ALLOW_TF32,
             backward=True
         )
-        # p = tl.where(M_mask[:, None], p, 0.)
-        # log_om_beta = tl.where(M_mask[:, None], log_om_beta, 0.)
+
         neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
 
         # --- Do gradient stuff ---
         dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
         att_dA = (p * dA).to(cm.dtype)
         cumul_att_dA = tl.dot(att_dA, tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+
         grad_prev_acc += tl.sum(att_dA, axis=1)
+
         beta = 1 - tl.exp2(log_om_beta.to(tl.float32))
         dqk = att_dA - beta * cumul_att_dA
+
+        dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
 
         block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
@@ -566,12 +564,12 @@ def _backward_one_row(
             mask=N_mask[:, None] & D_mask[None, :],
             NO_MASK=(not on_band) and NO_D_MASK # static masking
         )
-        dq = tl.dot(dqk.to(k.dtype), k, acc=dq, allow_tf32=ALLOW_TF32)
+
         # --- End gradient stuff ---
 
         N_blk_idxs += BLOCK_N
         N_blk_idxs_start += BLOCK_N
-        K_blk_ptrs += BLOCK_N * stride_kn
+        KT_blk_ptrs += BLOCK_N * stride_kn
         V_blk_ptrs += BLOCK_N * stride_vn
         DK_blk_ptrs += BLOCK_N * stride_dkn
         DV_blk_ptrs += BLOCK_N * stride_dvn

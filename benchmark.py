@@ -130,7 +130,7 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, b
     if bwd:
         def fun_():
             o = fun()
-            # dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
+            dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
         return triton.testing.do_bench(fun_, warmup=warmup, rep=rep)
     else:
         return triton.testing.do_bench(fun, warmup=warmup, rep=rep)
