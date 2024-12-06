@@ -3,8 +3,6 @@ import torch
 import triton
 import triton.language as tl
 from torch.nn import functional as F
-
-
 log2 = math.log(2)
 inv_log2 = 1 / log2
 ALLOW_TF32 = True
@@ -331,22 +329,37 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
 
 
 @triton.jit
-def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK):
-    # tl.static_print(Lock_ptr)
-    locked = tl.atomic_cas(Lock_ptr, 0, 1)
-    while locked == 1:
-        locked = tl.atomic_cas(Lock_ptr, 0, 1)
+def locked_add(Lock_ptr, Count_ptr,
+               A_ptrs, a, B_ptrs, b,
+               N_mask, NO_N_MASK,
+               D_mask, NO_D_MASK: tl.constexpr):
+    # locked = tl.atomic_cas(Lock_ptr, 0, 1)
+    # while locked == 1:
+    #     locked = tl.atomic_cas(Lock_ptr, 0, 1)
+    while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
+        pass
 
     count = tl.load(Count_ptr)
-    if NO_MASK:
-        if count == 0:
-            tl.store(A_ptrs, a)
-            tl.store(B_ptrs, b)
-            tl.store(Count_ptr, 1)
+    if NO_D_MASK:
+        if NO_N_MASK:
+            if count == 0:
+                tl.store(A_ptrs, a)
+                tl.store(B_ptrs, b)
+                tl.store(Count_ptr, 1)
+            else:
+                tl.store(A_ptrs, a + tl.load(A_ptrs))
+                tl.store(B_ptrs, b + tl.load(B_ptrs))
         else:
-            tl.store(A_ptrs, a + tl.load(A_ptrs))
-            tl.store(B_ptrs, b + tl.load(B_ptrs))
+            if count == 0:
+                tl.store(A_ptrs, a, mask=N_mask[:, None])
+                tl.store(B_ptrs, b, mask=N_mask[:, None])
+                tl.store(Count_ptr, 1)
+            else:
+                tl.store(A_ptrs, a + tl.load(A_ptrs, mask=N_mask[:, None]), mask=N_mask[:, None])
+                tl.store(B_ptrs, b + tl.load(B_ptrs, mask=N_mask[:, None]), mask=N_mask[:, None])
+            
     else:
+        mask = N_mask[:, None] & D_mask[None, :]
         if count == 0:
             tl.store(A_ptrs, a, mask=mask)
             tl.store(B_ptrs, b, mask=mask)
@@ -354,7 +367,6 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, mask, NO_MASK):
         else:
             tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
             tl.store(B_ptrs, b + tl.load(B_ptrs, mask=mask), mask=mask)
-
     tl.atomic_xchg(Lock_ptr, 0)
     
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"], 
@@ -525,6 +537,7 @@ def _backward_one_row(
     for i in range(iters):
         on_band = (iters - i - 1) < BLOCK_M // BLOCK_N
         N_mask = N_blk_idxs < sequence_end_offset
+        NO_N_MASK = (N_blk_idxs_start + BLOCK_N - 1) < sequence_end_offset
         # --- Recompute block ---
         kT, v = load_kv(
             KT_blk_ptrs, V_blk_ptrs,
@@ -545,12 +558,12 @@ def _backward_one_row(
 
         # --- Do gradient stuff ---
         dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
-        att_dA = (p * dA).to(cm.dtype)
-        cumul_att_dA = tl.dot(att_dA, tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+        att_dA = p * dA
+        cumul_att_dA = tl.dot(att_dA.to(cm.dtype), tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
 
         grad_prev_acc += tl.sum(att_dA, axis=1)
 
-        beta = 1 - tl.exp2(log_om_beta.to(tl.float32))
+        beta = 1 - tl.exp2(log_om_beta)
         dqk = att_dA - beta * cumul_att_dA
 
         dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
@@ -561,8 +574,8 @@ def _backward_one_row(
             KV_Lock_ptr + i, KV_Count_ptr + i,
             DK_blk_ptrs, block_dk,
             DV_blk_ptrs, block_dv,
-            mask=N_mask[:, None] & D_mask[None, :],
-            NO_MASK=(not on_band) and NO_D_MASK # static masking
+            N_mask, NO_N_MASK,
+            D_mask, NO_D_MASK
         )
 
         # --- End gradient stuff ---
@@ -573,8 +586,10 @@ def _backward_one_row(
         V_blk_ptrs += BLOCK_N * stride_vn
         DK_blk_ptrs += BLOCK_N * stride_dkn
         DV_blk_ptrs += BLOCK_N * stride_dvn
-
-    tl.store(DQ_blk_ptrs, (logit_scale * dq).to(DQ_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
+    if NO_D_MASK:
+        tl.store(DQ_blk_ptrs, (logit_scale * dq).to(DQ_ptr.type.element_ty), mask=M_mask[:, None])
+    else:
+        tl.store(DQ_blk_ptrs, (logit_scale * dq).to(DQ_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
 
 
