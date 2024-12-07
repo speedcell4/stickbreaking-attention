@@ -150,7 +150,7 @@ def _forward(
     A_head_ptr = A_ptr + stride_ah * head_id
     W_head_ptr = W_ptr + stride_wh * head_id
     _forward_one_row(
-        head_id, sequence_block_start_offset,
+        sequence_block_start_offset,
         sequence_start_offset, sequence_end_offset,
         qk_scale,
         M_range, N_range,
@@ -172,7 +172,7 @@ def _forward(
 
 @triton.jit
 def _forward_one_row(
-    head_id, sequence_block_start_offset,
+    sequence_block_start_offset,
     sequence_start_offset, sequence_end_offset,
     qk_scale,
     M_range,
