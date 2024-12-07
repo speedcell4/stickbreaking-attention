@@ -129,9 +129,6 @@ def _forward(
 ): 
     head_id = tl.program_id(0)
     block_id = tl.num_programs(1) - tl.program_id(1) - 1
-    sequence_start_offset, sequence_end_offset, sequence_block_start_offset, _ = \
-        compute_boundaries(block_id, CSL_ptr, CPO_ptr, batch_size, BLOCK_CSL, BLOCK_M)
-
     # Universal stuff
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
@@ -141,19 +138,30 @@ def _forward(
     cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
 
+    sequence_start_offset, sequence_end_offset, sequence_block_start_offset, _ = \
+        compute_boundaries(block_id, CSL_ptr, CPO_ptr, batch_size, BLOCK_CSL, BLOCK_M)
+
+    # One head.
+    Q_head_ptr = Q_ptr + stride_qh * head_id
+    K_head_ptr = K_ptr + stride_kh * head_id
+    V_head_ptr = V_ptr + stride_vh * head_id
+    O_head_ptr = O_ptr + stride_oh * head_id
+    R_head_ptr = R_ptr + stride_rh * head_id
+    A_head_ptr = A_ptr + stride_ah * head_id
+    W_head_ptr = W_ptr + stride_wh * head_id
     _forward_one_row(
         head_id, sequence_block_start_offset,
         sequence_start_offset, sequence_end_offset,
         qk_scale,
         M_range, N_range,
         D_range, D_mask, cm,
-        Q_ptr, stride_qh, stride_qm, stride_qd,
-        K_ptr, stride_kh, stride_kn, stride_kd,
-        V_ptr, stride_vh, stride_vn, stride_vd,
-        O_ptr, stride_oh, stride_om, stride_od,
-        R_ptr, stride_rh, stride_rm,
-        A_ptr, stride_ah, stride_am,
-        W_ptr, stride_wh, stride_wm, stride_wn,
+        Q_head_ptr, stride_qm, stride_qd,
+        K_head_ptr, stride_kn, stride_kd,
+        V_head_ptr, stride_vn, stride_vd,
+        O_head_ptr, stride_om, stride_od,
+        R_head_ptr, stride_rm,
+        A_head_ptr, stride_am,
+        W_head_ptr, stride_wm, stride_wn,
         BLOCK_D,
         NO_D_MASK, NO_M_MASK, NO_N_MASK,
         ALLOW_TF32,
@@ -170,13 +178,13 @@ def _forward_one_row(
     M_range,
     N_range,
     D_range, D_mask, cm,
-    Q_ptr, stride_qh, stride_qm, stride_qd,
-    K_ptr, stride_kh, stride_kn, stride_kd,
-    V_ptr, stride_vh, stride_vn, stride_vd,
-    O_ptr, stride_oh, stride_om, stride_od,
-    R_ptr, stride_rh, stride_rm,
-    A_ptr, stride_ah, stride_am,
-    W_ptr, stride_wh, stride_wm, stride_wn,
+    Q_head_ptr, stride_qm, stride_qd,
+    K_head_ptr, stride_kn, stride_kd,
+    V_head_ptr, stride_vn, stride_vd,
+    O_head_ptr, stride_om, stride_od,
+    R_head_ptr, stride_rm,
+    A_head_ptr, stride_am,
+    W_head_ptr, stride_wm, stride_wn,
     BLOCK_D: tl.constexpr,
     NO_D_MASK: tl.constexpr,
     NO_M_MASK: tl.constexpr,
@@ -198,13 +206,12 @@ def _forward_one_row(
     N_blk_idxs = N_blk_idxs_start + N_range
 
     # Init pointers
-    Q_blk_ptrs = Q_ptr + stride_qh * head_id + stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :]
-    KT_blk_ptrs = K_ptr + stride_kh * head_id + stride_kn * N_blk_idxs[None, :] + stride_kd * D_range[:, None]
-    V_blk_ptrs = V_ptr + stride_vh * head_id + stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :]
-    O_blk_ptrs = O_ptr + stride_oh * head_id + stride_om * M_blk_idxs[:, None] + stride_od * D_range[None, :]
-    R_blk_ptrs = R_ptr + stride_rh * head_id + stride_rm * M_blk_idxs
-    A_blk_ptrs = A_ptr + stride_ah * head_id + stride_am * M_blk_idxs
-
+    Q_blk_ptrs = Q_head_ptr + stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :]
+    KT_blk_ptrs = K_head_ptr + stride_kn * N_blk_idxs[None, :] + stride_kd * D_range[:, None]
+    V_blk_ptrs = V_head_ptr + stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :]
+    O_blk_ptrs = O_head_ptr + stride_om * M_blk_idxs[:, None] + stride_od * D_range[None, :]
+    R_blk_ptrs = R_head_ptr + stride_rm * M_blk_idxs
+    A_blk_ptrs = A_head_ptr + stride_am * M_blk_idxs
     # --- Load band vectors ---
     if NO_D_MASK:
         if NO_M_MASK:
@@ -246,20 +253,20 @@ def _forward_one_row(
         acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
         if return_attention: # TODO write returns_attention_weight
             tl.store(
-                W_ptr + stride_wh * head_id + stride_wm * M_blk_idxs[:, None] + stride_wn * N_blk_idxs[None, :],
+                W_head_ptr + stride_wm * M_blk_idxs[:, None] + stride_wn * N_blk_idxs[None, :],
                 p,
                 mask=(M_blk_idxs < sequence_end_offset)[:, None] & (N_blk_idxs < sequence_end_offset)[None, :]
             )
     if NO_M_MASK:
         tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc))
-        tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty))
+        tl.store(A_blk_ptrs, neg_log_acc.to(A_head_ptr.type.element_ty))
     else:
         tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc), mask=M_mask)
-        tl.store(A_blk_ptrs, neg_log_acc.to(A_ptr.type.element_ty), mask=M_mask)
+        tl.store(A_blk_ptrs, neg_log_acc.to(A_head_ptr.type.element_ty), mask=M_mask)
     if NO_D_MASK:
-        tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None])
+        tl.store(O_blk_ptrs, acc.to(O_head_ptr.type.element_ty), mask=M_mask[:, None])
     else:
-        tl.store(O_blk_ptrs, acc.to(O_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
+        tl.store(O_blk_ptrs, acc.to(O_head_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
 
 def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attention=False):

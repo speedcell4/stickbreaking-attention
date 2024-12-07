@@ -86,27 +86,27 @@ def flash_fwdbwd(rope, position_ids, do, q, k, v, lengths):
 
 
 providers = [
-    ("reference", "Stickbreaking (ref.)", ("red", "-")),
+    # ("reference", "Stickbreaking (ref.)", ("red", "-")),
     ("triton", "Stickbreaking", ("blue", "-")),
     ("flash", "Flash Attention", ("green", "-")),
 ]
 @triton.testing.perf_report([
     triton.testing.Benchmark(
         x_names=["length"],
-        x_vals=[4096, 8192, 8192 * 2],
+        x_vals=[4096, 2 * 4096, 3 * 4096, 4 * 4096],
         line_arg="provider",
         line_vals=[x[0] for x in providers],
         line_names=[x[1] for x in providers],
         styles=[x[2] for x in providers],
         ylabel="ms",
         plot_name=f"triton v torch",
-        args={"batch_size": 4, "num_heads": 12, "head_dim": 128, "dtype": torch.bfloat16, "bwd": True}
+        args={"batch_size": 4, "num_heads": 12, "head_dim": 128, "dtype": torch.bfloat16, "bwd": False}
     )
 ])
 def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, bwd):
     device = torch.device('cuda:0')
     set_seed(1337)
-    lengths = torch.randint(length // 2, length, (batch_size,)).to(device=device, dtype=torch.int32)
+    lengths = torch.randint(length, length + 1, (batch_size,)).to(device=device, dtype=torch.int32)
     total_length = lengths.sum()
     warmup = 100
     rep = 1000
