@@ -32,6 +32,9 @@ def stickbreaking(q, k, v, mask, cum_weight):
 
 
 def ref_fwd(q, k, v, lengths):
+    q = q.permute(1, 0, 2)
+    k = k.permute(1, 0, 2)
+    v = v.permute(1, 0, 2)
     splits = list(lengths.cpu().numpy())
     max_len = max(splits)
     cm = torch.ones(max_len, max_len).tril(-1).to(q)
@@ -55,6 +58,9 @@ def ref_fwdbwd(do, q, k, v, lengths):
     return o
 
 def tri_fwdbwd(do, q, k, v, lengths):
+    q = q.permute(1, 0, 2)
+    k = k.permute(1, 0, 2)
+    v = v.permute(1, 0, 2)
     cu_seqlens = torch.cumsum(lengths, dim=-1)
     o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
                             inv_temp=1 / math.sqrt(q.size(-1)),
@@ -70,9 +76,6 @@ def flash_fwdbwd(rope, position_ids, do, q, k, v, lengths):
     cu_seqlens = torch.cumsum(lengths, dim=-1)
     cu_seqlens = F.pad(cu_seqlens, (1, 0)).to(torch.int32)
     max_len = torch.max(lengths)
-    q = q.permute(1, 0, 2)
-    k = k.permute(1, 0, 2)
-    v = v.permute(1, 0, 2)
     o = flash_attn_varlen_func(
         q, k, v,
         cu_seqlens_q=cu_seqlens,
@@ -111,9 +114,9 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, b
     warmup = 100
     rep = 1000
 
-    q = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
-    k = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
-    v = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
+    q = torch.randn((total_length, num_heads, head_dim), device=device, dtype=dtype)
+    k = torch.randn((total_length, num_heads, head_dim), device=device, dtype=dtype)
+    v = torch.randn((total_length, num_heads, head_dim), device=device, dtype=dtype)
     q.requires_grad_()
     k.requires_grad_()
     v.requires_grad_()
