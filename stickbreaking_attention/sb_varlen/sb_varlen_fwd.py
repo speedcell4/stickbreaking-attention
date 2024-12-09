@@ -86,8 +86,8 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
 def get_configs():
     return [
         triton.Config({}, num_stages=s, num_warps=w)
-        for s in [4]
-        for w in [4]
+        for s in [4, 2, 3, 5, 6, 7, 8]
+        for w in [4, 2]
     ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"])
 @triton.jit
