@@ -6,8 +6,321 @@ from . import log2, inv_log2, ALLOW_TF32
 
 @triton.jit
 def softplus(x):
-    out = tl.where(x < 15., tl.math.log2(1 + tl.math.exp2(x)), x)
+    # out = tl.where(x < 15., tl.math.log2(1 + tl.math.exp2(x)), x)
     # out = tl.maximum(0, x)
+    out = tl.inline_asm_elementwise(
+        asm="""
+
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $16, 15.;
+            setp.lt.f32  q, $16, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $0, $16;
+            // < -15  just return 0
+            @q  mov.f32  $0, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $0, $2;
+            @!r add.f32        $0, $0, 1.0;
+            @!r lg2.approx.f32 $0, $0;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $17, 15.;
+            setp.lt.f32  q, $17, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $1, $17;
+            // < -15  just return 0
+            @q  mov.f32  $1, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $1, $2;
+            @!r add.f32        $1, $1, 1.0;
+            @!r lg2.approx.f32 $1, $1;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $18, 15.;
+            setp.lt.f32  q, $18, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $2, $18;
+            // < -15  just return 0
+            @q  mov.f32  $2, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $2, $2;
+            @!r add.f32        $2, $2, 1.0;
+            @!r lg2.approx.f32 $2, $2;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $19, 15.;
+            setp.lt.f32  q, $19, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $3, $19;
+            // < -15  just return 0
+            @q  mov.f32  $3, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $3, $2;
+            @!r add.f32        $3, $3, 1.0;
+            @!r lg2.approx.f32 $3, $3;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $20, 15.;
+            setp.lt.f32  q, $20, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $4, $20;
+            // < -15  just return 0
+            @q  mov.f32  $4, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $4, $2;
+            @!r add.f32        $4, $4, 1.0;
+            @!r lg2.approx.f32 $4, $4;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $21, 15.;
+            setp.lt.f32  q, $21, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $5, $21;
+            // < -15  just return 0
+            @q  mov.f32  $5, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $5, $2;
+            @!r add.f32        $5, $5, 1.0;
+            @!r lg2.approx.f32 $5, $5;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $22, 15.;
+            setp.lt.f32  q, $22, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $6, $22;
+            // < -15  just return 0
+            @q  mov.f32  $6, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $6, $2;
+            @!r add.f32        $6, $6, 1.0;
+            @!r lg2.approx.f32 $6, $6;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $23, 15.;
+            setp.lt.f32  q, $23, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $7, $23;
+            // < -15  just return 0
+            @q  mov.f32  $7, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $7, $2;
+            @!r add.f32        $7, $7, 1.0;
+            @!r lg2.approx.f32 $7, $7;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $24, 15.;
+            setp.lt.f32  q, $24, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $8, $24;
+            // < -15  just return 0
+            @q  mov.f32  $8, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $8, $2;
+            @!r add.f32        $8, $8, 1.0;
+            @!r lg2.approx.f32 $8, $8;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $25, 15.;
+            setp.lt.f32  q, $25, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $9, $25;
+            // < -15  just return 0
+            @q  mov.f32  $9, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $9, $2;
+            @!r add.f32        $9, $9, 1.0;
+            @!r lg2.approx.f32 $9, $9;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $26, 15.;
+            setp.lt.f32  q, $26, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $10, $26;
+            // < -15  just return 0
+            @q  mov.f32  $10, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $10, $2;
+            @!r add.f32        $10, $10, 1.0;
+            @!r lg2.approx.f32 $10, $10;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $27, 15.;
+            setp.lt.f32  q, $27, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $11, $27;
+            // < -15  just return 0
+            @q  mov.f32  $11, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $11, $2;
+            @!r add.f32        $11, $11, 1.0;
+            @!r lg2.approx.f32 $11, $11;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $28, 15.;
+            setp.lt.f32  q, $28, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $12, $28;
+            // < -15  just return 0
+            @q  mov.f32  $12, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $12, $2;
+            @!r add.f32        $12, $12, 1.0;
+            @!r lg2.approx.f32 $12, $12;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $29, 15.;
+            setp.lt.f32  q, $29, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $13, $29;
+            // < -15  just return 0
+            @q  mov.f32  $13, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $13, $2;
+            @!r add.f32        $13, $13, 1.0;
+            @!r lg2.approx.f32 $13, $13;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $30, 15.;
+            setp.lt.f32  q, $30, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $14, $30;
+            // < -15  just return 0
+            @q  mov.f32  $14, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $14, $2;
+            @!r add.f32        $14, $14, 1.0;
+            @!r lg2.approx.f32 $14, $14;
+
+    }
+    
+    {
+    
+            .reg .pred p;
+            .reg .pred q;
+            .reg .pred r;
+            setp.gt.f32  p, $31, 15.;
+            setp.lt.f32  q, $31, -15.;
+            or.pred      r, p, q;
+            // >  15 just return x
+            @p  mov.f32  $15, $31;
+            // < -15  just return 0
+            @q  mov.f32  $15, 0.;
+            // otherwise do the log(exp(x) + 1)
+            @!r ex2.approx.f32 $15, $2;
+            @!r add.f32        $15, $15, 1.0;
+            @!r lg2.approx.f32 $15, $15;
+
+    }
+        """, 
+        constraints=("=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r"),  # Constraints: both operands are registers
+        args=[x,],  # Pass the input tensor
+        dtype=tl.float32,  # Output dtype
+        is_pure=True,  # Mark as pure (no side-effects)
+        pack=16
+    ) 
     return out
 
 @triton.jit
@@ -91,8 +404,8 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
 def get_configs():
     return [
         triton.Config({}, num_stages=s, num_warps=w)
-        for s in [4, 2, 3, 5, 6, 7, 8]
-        for w in [4, 2]
+        for s in [4]
+        for w in [4]
     ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"])
 @triton.jit
@@ -124,6 +437,7 @@ def _forward(
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
 ): 
+    tl.static_assert(BLOCK_M % BLOCK_N == 0)
     head_pid = tl.program_id(0)
     prog_id = tl.program_id(1)
     # Universal stuff
@@ -151,8 +465,8 @@ def _forward(
     # pid = tl.program_id(0) * tl.num_programs(1) + tl.program_id(1) # TODO debug
     seq_alloc_prog_id = prog_id - prog_id_start_offset
     if seq_alloc_prog_id > 0:
-        head_id = head_pid * 2
         # First head block
+        head_id = head_pid * 2
         seq_prog_id = prog_id - prog_id_start_offset - 1
         # tl.store(pid_debug_ptr + head_id * tl.num_programs(1) + prog_id_start_offset + seq_prog_id, pid)
         Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
