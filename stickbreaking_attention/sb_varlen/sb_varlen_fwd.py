@@ -65,29 +65,12 @@ def compute_block(
 
 
 
-@triton.jit
-def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
-                       batch_size: tl.constexpr, BLOCK_CSL: tl.constexpr, BLOCK_M: tl.constexpr):
-    CSL_range = tl.arange(0, BLOCK_CSL)
-    block_offsets = tl.load(CPO_ptr + CSL_range, mask=CSL_range < batch_size, other=tl.num_programs(1))
-    sequence_id = tl.sum((block_id >= block_offsets).to(tl.int32), axis=0) # lookup sequence in batch
-    if sequence_id == 0:
-        sequence_start_offset = 0
-        block_start_offset = 0
-    else:
-        sequence_start_offset = tl.load(CSL_ptr + sequence_id - 1).to(tl.int32)
-        block_start_offset = tl.load(CPO_ptr + sequence_id - 1).to(tl.int32)
-    sequence_end_offset = tl.load(CSL_ptr + sequence_id).to(tl.int32)
-    block_offset = block_id - block_start_offset
-    sequence_block_start_offset = sequence_start_offset + BLOCK_M * block_offset
-    return sequence_start_offset, sequence_end_offset, sequence_block_start_offset, block_start_offset
-
 
 def get_configs():
     return [
         triton.Config({}, num_stages=s, num_warps=w)
-        for s in [4, 2, 3, 5, 6, 7, 8]
-        for w in [4, 2]
+        for s in [4]
+        for w in [4]
     ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"])
 @triton.jit
@@ -306,25 +289,14 @@ def _forward_one_row(
         tl.store(O_blk_ptrs, acc.to(O_head_seq_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
 
-def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
-    lens = cu_seqlens.clone()
-    lens[1:] -= cu_seqlens[:-1]
-    seq_num_programs = ((lens - 1) // BLOCK_SIZE) + 1 
-    seq_num_programs += 1
-    seq_program_offsets = torch.cumsum(seq_num_programs, dim=0)
-    return seq_program_offsets
-
-def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attention=False):
+def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
+           no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32):
     with torch.cuda.device(q.device):
         num_heads = q.size(0)
         batch_size = cu_seqlens.size(0)
         token_size = q.size(1)
         dim_size = q.size(-1)
-        BLOCK_M = 64
-        BLOCK_N = 32
         BLOCK_D = triton.next_power_of_2(dim_size)
-
-        seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
 
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
@@ -336,11 +308,10 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
             W = torch.full((num_heads, token_size, token_size), 0., dtype=torch.float32, device=q.device)
         else:
             W = torch.empty((1, 1, 1), device=q.device)
+
         num_folded_heads = triton.cdiv(num_heads, 2)
         num_seq_blocks = seq_program_offsets[-1]
-        # pid_debug = torch.zeros((num_heads, num_seq_blocks), dtype=torch.int32, device=q.device)
         grid = (num_folded_heads, num_seq_blocks)
-        # print(grid, math.prod(grid).item())
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
             k, k.stride(0), k.stride(1), k.stride(2),
@@ -368,10 +339,9 @@ def sb_fwd(q, k, v, cu_seqlens, logit_scale=None, no_grad=False, return_attentio
             inv_log2=inv_log2,
             return_attention=return_attention,
         )
-        # print(pid_debug)
         if return_attention:
-            return o, rem, neg_log_acc, seq_program_offsets, W
+            return o, rem, neg_log_acc, W
         else:
-            return o, rem, neg_log_acc, seq_program_offsets
+            return o, rem, neg_log_acc
 
 

@@ -3,7 +3,27 @@ import torch
 import triton
 import triton.language as tl
 from . import log2, inv_log2, ALLOW_TF32
-from .sb_varlen_fwd import get_configs, compute_boundaries
+from .sb_varlen_fwd import get_configs, load_kv, compute_block
+
+
+@triton.jit
+def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
+                       batch_size: tl.constexpr, BLOCK_CSL: tl.constexpr, BLOCK_M: tl.constexpr):
+    CSL_range = tl.arange(0, BLOCK_CSL)
+    block_offsets = tl.load(CPO_ptr + CSL_range, mask=CSL_range < batch_size, other=tl.num_programs(1))
+    sequence_id = tl.sum((block_id >= block_offsets).to(tl.int32), axis=0) # lookup sequence in batch
+    if sequence_id == 0:
+        sequence_start_offset = 0
+        block_start_offset = 0
+    else:
+        sequence_start_offset = tl.load(CSL_ptr + sequence_id - 1).to(tl.int32)
+        block_start_offset = tl.load(CPO_ptr + sequence_id - 1).to(tl.int32)
+    sequence_end_offset = tl.load(CSL_ptr + sequence_id).to(tl.int32)
+    block_offset = block_id - block_start_offset
+    sequence_block_start_offset = sequence_start_offset + BLOCK_M * block_offset
+    return sequence_start_offset, sequence_end_offset, sequence_block_start_offset, block_start_offset
+
+
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr,
@@ -77,7 +97,7 @@ def _backward(
     acc_dtype: tl.constexpr = tl.float32,
 ):
     head_id = tl.program_id(0)
-    block_id = tl.num_programs(1) - tl.program_id(1) - 1
+    block_id = tl.program_id(1)
 
     sequence_start_offset, sequence_end_offset, sequence_block_start_offset, block_start_offset = \
         compute_boundaries(block_id, CSL_ptr, CPO_ptr, batch_size, BLOCK_CSL, BLOCK_M)
@@ -192,10 +212,6 @@ def _backward_one_row(
         dr = tl.load(DR_blk_ptrs, mask=M_mask)
         neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask)
 
-    # q = q.to(acc_dtype)
-    # do = do.to(acc_dtype)
-    # dr = dr.to(acc_dtype)
-    # cm = cm.to(acc_dtype)
     # --- End band vectors ---
 
     # Init accumulators
@@ -333,11 +349,5 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2
         )
-        if False:
-            from matplotlib import pyplot as plt
-            plt.figure(dpi=500)
-            plt.imshow(W[0].cpu().to(torch.float32), interpolation='none')
-            plt.savefig('attn.png')
-
         return dq, dk, dv
 

@@ -10,16 +10,30 @@ ALLOW_TF32 = True
 from .sb_varlen_fwd import sb_fwd
 from .sb_varlen_bwd import sb_bwd
 
+
+def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
+    lens = cu_seqlens.clone()
+    lens[1:] -= cu_seqlens[:-1]
+    seq_num_programs = ((lens - 1) // BLOCK_SIZE) + 1 
+    seq_program_offsets = torch.cumsum(seq_num_programs, dim=0)
+    return seq_program_offsets
+
+
 class StickBreakingAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens, inv_temp):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
-
-        o, rem, neg_log_acc, seq_program_offsets = sb_fwd(
-            q, k, v, cu_seqlens,
+        BLOCK_M = 64
+        BLOCK_N = 32
+        seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
+        o, rem, neg_log_acc = sb_fwd(
+            q, k, v,
+            cu_seqlens,
+            seq_program_offsets + torch.arange(seq_program_offsets.size(0), device=q.device) + 1,
             logit_scale=inv_temp,
-            no_grad=no_grad
+            no_grad=no_grad,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N
         )
         ctx.save_for_backward(q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets)
         ctx.logit_scale = logit_scale
@@ -30,7 +44,10 @@ class StickBreakingAttention(torch.autograd.Function):
         logit_scale = ctx.logit_scale
         q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets = ctx.saved_tensors
         dq, dk, dv = sb_bwd(
-            do, drem, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale
+            do, drem,
+            q, k, v,
+            cu_seqlens, seq_program_offsets,
+            neg_log_acc, logit_scale
         )
         return dq, dk, dv, None, None
 
