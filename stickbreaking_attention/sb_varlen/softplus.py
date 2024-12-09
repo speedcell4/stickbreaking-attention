@@ -4,16 +4,11 @@ from triton import language as tl
 def _generate_asm(num_pack):
     template = """
             .reg .pred p;
-            .reg .pred q;
-            .reg .pred r;
             setp.gt.f32  p, ${in_reg}, 15.;
-            setp.lt.f32  q, ${in_reg}, -15.;
-            or.pred      r, p, q;
-            @p  mov.f32  ${out_reg}, ${in_reg};       // >  15 return x
-            @q  mov.f32  ${out_reg}, 0.;              // < -15 return 0
-            @!r ex2.approx.ftz.f32 ${out_reg}, ${in_reg}; // otherwise log(exp(x) + 1)
-            @!r add.f32        ${out_reg}, ${out_reg}, 1.0;
-            @!r lg2.approx.ftz.f32 ${out_reg}, ${out_reg};
+            @p  mov.f32  ${out_reg}, ${in_reg};           // >  15 return x
+            @!p ex2.approx.ftz.f32 ${out_reg}, ${in_reg}; // otherwise log(exp(x) + 1)
+            @!p add.f32        ${out_reg}, ${out_reg}, 1.0;
+            @!p lg2.approx.ftz.f32 ${out_reg}, ${out_reg};
     """
     out_str = ""
 
