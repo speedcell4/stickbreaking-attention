@@ -121,8 +121,8 @@ def locked_add(Lock_ptr, Count_ptr,
 def get_configs():
     return [
         triton.Config({}, num_stages=s, num_warps=w)
-        for s in [4, 2, 3, 5, 6, 7, 8]
-        for w in [4, 2]
+        for s in [4]# , 2, 3, 5, 6, 7, 8]
+        for w in [4]# , 2]
     ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"], 
                  reset_to_zero=["DK_ptr", "DV_ptr"])
@@ -336,13 +336,11 @@ def _backward_one_row(
         # cumul_att_dA = tl.cumsum(att_dA, axis=1) + grad_prev_acc[:, None] # 180 -> 174
         grad_prev_acc += tl.sum(att_dA, axis=1)
         beta = 1 - tl.exp2(log_om_beta) # 180 -> 175
-        dqk_scaled = att_dA - beta * cumul_att_dA
-        dqk_scaled *= logit_scale # do scaling at dqk
-        dq = tl.dot(dqk_scaled.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
-        block_dk = tl.dot(tl.trans(dqk_scaled.to(q.dtype)), q, allow_tf32=ALLOW_TF32)
-        # block_dk = tl.dot(tl.trans(dqk).to(q_scaled.dtype), q_scaled, allow_tf32=ALLOW_TF32)  * logit_scale
+        dqk = att_dA - beta * cumul_att_dA
+        dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
+        # block_dk = tl.dot(tl.trans(dqk.to(q.dtype)), q, allow_tf32=ALLOW_TF32)
+        block_dk = tl.dot(tl.trans(dqk).to(q.dtype), q, allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
-
         locked_add(
             KV_Lock_ptr + i, KV_Count_ptr + i,
             DK_blk_ptrs, block_dk,
@@ -358,8 +356,7 @@ def _backward_one_row(
         DK_blk_ptrs += BLOCK_N * stride_dkn
         DV_blk_ptrs += BLOCK_N * stride_dvn
 
-    # dq = (logit_scale * dq).to(DQ_head_seq_ptr.type.element_ty)
-    dq = dq.to(DQ_head_seq_ptr.type.element_ty)
+    dq = (logit_scale * dq).to(DQ_head_seq_ptr.type.element_ty)
 
     if NO_D_MASK:
         tl.store(DQ_blk_ptrs, dq, mask=M_mask[:, None])
