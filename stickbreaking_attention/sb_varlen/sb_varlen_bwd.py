@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from . import log2, inv_log2, ALLOW_TF32
-from .sb_varlen_fwd import get_configs, load_kv, compute_block
+from .sb_varlen_fwd import load_kv, compute_block
 
 
 @triton.jit
@@ -26,10 +26,26 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
 
 
 @triton.jit
+# TODO add two-step lock?
 def locked_add(Lock_ptr, Count_ptr,
                A_ptrs, a, B_ptrs, b,
                N_mask, NO_N_MASK,
                D_mask, NO_D_MASK: tl.constexpr):
+    """
+        With Lock
+        length  Stickbreaking  Flash Attention
+    0   4096.0      11.117788         4.148892
+    1   8192.0      43.532806        11.959753
+    2  12288.0     102.326492        24.255974
+    3  16384.0     192.534637        40.825050
+
+        Without lock
+            length  Stickbreaking  Flash Attention
+    0   4096.0       9.227353         4.143429
+    1   8192.0      36.784805        11.969437
+    2  12288.0      83.783920        24.314171
+    3  16384.0     150.149780        40.906620
+    """
     while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
         pass
 
@@ -39,7 +55,7 @@ def locked_add(Lock_ptr, Count_ptr,
             if count == 0:
                 tl.store(A_ptrs, a)
                 tl.store(B_ptrs, b)
-                tl.store(Count_ptr, 1)
+                tl.store(Count_ptr, True)
             else:
                 tl.store(A_ptrs, a + tl.load(A_ptrs))
                 tl.store(B_ptrs, b + tl.load(B_ptrs))
@@ -47,7 +63,7 @@ def locked_add(Lock_ptr, Count_ptr,
             if count == 0:
                 tl.store(A_ptrs, a, mask=N_mask[:, None])
                 tl.store(B_ptrs, b, mask=N_mask[:, None])
-                tl.store(Count_ptr, 1)
+                tl.store(Count_ptr, True)
             else:
                 tl.store(A_ptrs, a + tl.load(A_ptrs, mask=N_mask[:, None]), mask=N_mask[:, None])
                 tl.store(B_ptrs, b + tl.load(B_ptrs, mask=N_mask[:, None]), mask=N_mask[:, None])
@@ -64,6 +80,12 @@ def locked_add(Lock_ptr, Count_ptr,
 
     tl.atomic_xchg(Lock_ptr, 0)
     
+def get_configs():
+    return [
+        triton.Config({}, num_stages=s, num_warps=w)
+        for s in [4]
+        for w in [4]
+    ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"], 
                  reset_to_zero=["DK_ptr", "DV_ptr"])
 @triton.jit
@@ -136,7 +158,8 @@ def _backward(
     DQ_head_seq_ptr = DQ_ptr + stride_dqh * head_id + stride_dqm * seq_start_offset
     DK_head_seq_ptr = DK_ptr + stride_dkh * head_id + stride_dkn * seq_start_offset
     DV_head_seq_ptr = DV_ptr + stride_dvh * head_id + stride_dvn * seq_start_offset
-
+    KV_Lock_head_seq_ptr =  KV_Lock_ptr + head_id * stride_kvl + num_N_per_M * prog_id_start_offset
+    KV_Count_head_seq_ptr = KV_Count_ptr + head_id * stride_kvl + num_N_per_M * prog_id_start_offset
     _backward_one_row(
         seq_prog_id, seq_length,
         qk_scale,
@@ -152,8 +175,7 @@ def _backward(
         DQ_head_seq_ptr, stride_dqm, stride_dqd,
         DK_head_seq_ptr, stride_dkn, stride_dkd,
         DV_head_seq_ptr, stride_dvn, stride_dvd,
-        KV_Lock_ptr + head_id * stride_kvl + num_N_per_M * prog_id_start_offset,
-        KV_Count_ptr + head_id * stride_kvl + num_N_per_M * prog_id_start_offset,
+        KV_Lock_head_seq_ptr, KV_Count_head_seq_ptr,
         stride_kvl,
         W_ptr, stride_Wh, stride_Wm, stride_Wn,
         logit_scale,
@@ -271,12 +293,9 @@ def _backward_one_row(
         neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
 
         # --- Do gradient stuff ---
-        dA = tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None]
-        att_dA = p * dA
+        att_dA = p * (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32).to(do.dtype) - dr[:, None])
         cumul_att_dA = tl.dot(att_dA.to(cm.dtype), tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
-
         grad_prev_acc += tl.sum(att_dA, axis=1)
-
         beta = 1 - tl.exp2(log_om_beta)
         dqk = att_dA - beta * cumul_att_dA
 
@@ -291,7 +310,6 @@ def _backward_one_row(
             N_mask, NO_N_MASK,
             D_mask, NO_D_MASK
         )
-
         # --- End gradient stuff ---
 
         N_blk_idxs += BLOCK_N
@@ -302,6 +320,7 @@ def _backward_one_row(
         DV_blk_ptrs += BLOCK_N * stride_dvn
 
     dq = (logit_scale * dq).to(DQ_head_seq_ptr.type.element_ty)
+
     if NO_D_MASK:
         tl.store(DQ_blk_ptrs, dq, mask=M_mask[:, None])
     else:
@@ -319,20 +338,21 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
             logit_scale = 1 / math.sqrt(dim_size)
 
         BLOCK_M = 64
-        BLOCK_N = 64
+        BLOCK_N = 32
         BLOCK_D = triton.next_power_of_2(dim_size)
         # BLOCK_BATCH = triton.next_power_of_2(batch_size)
         M_count = triton.cdiv(token_size, BLOCK_M)
         N_count = triton.cdiv(token_size, BLOCK_N)
 
-        dq = torch.zeros_like(q)
+        dq = torch.empty_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
 
         M_count = seq_program_offsets[-1]
         N_count = M_count * (BLOCK_M // BLOCK_N)
+
         dkdv_lock = torch.zeros((num_heads, N_count), dtype=torch.int32, device=q.device)
-        dkdv_count = torch.zeros((num_heads, N_count), dtype=torch.int32, device=q.device)
+        dkdv_count = torch.zeros((num_heads, N_count), dtype=torch.bool, device=q.device)
         if False:
             W = torch.zeros((num_heads, token_size, token_size), dtype=q.dtype, device=q.device) - 1
         else:
