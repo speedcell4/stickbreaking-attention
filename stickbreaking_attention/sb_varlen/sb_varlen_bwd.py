@@ -24,6 +24,45 @@ def compute_boundaries(block_id, CSL_ptr, CPO_ptr,
     return sequence_start_offset, sequence_end_offset, sequence_block_start_offset, block_start_offset
 
 
+@triton.jit
+def locked_dot(a, b,
+               Lock_ptr, Count_ptr,
+               O_ptrs,
+               row_mask, NO_ROW_MASK,
+               col_mask, NO_COL_MASK: tl.constexpr,
+               allow_tf32: tl.constexpr):
+    while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
+        pass
+    count = tl.load(Count_ptr)
+    if NO_COL_MASK:
+        if NO_ROW_MASK:
+            if count == 0:
+                tl.store(O_ptrs, tl.dot(a, b, allow_tf32=allow_tf32))
+                tl.store(Count_ptr, True)
+            else:
+                o = tl.load(O_ptrs)
+                o = tl.dot(a, b, acc=o, allow_tf32=allow_tf32)
+                tl.store(O_ptrs, o)
+        else:
+            if count == 0:
+                tl.store(O_ptrs, tl.dot(a, b, allow_tf32=allow_tf32), mask=row_mask[:, None])
+                tl.store(Count_ptr, True)
+            else:
+                o = tl.load(O_ptrs)
+                o = tl.dot(a, b, acc=o, allow_tf32=allow_tf32)
+                tl.store(O_ptrs, o, mask=row_mask[:, None])
+    else:
+        mask = row_mask[:, None] & col_mask[:, None]
+        if count == 0:
+            tl.store(O_ptrs, tl.dot(a, b, allow_tf32=allow_tf32), mask=mask)
+            tl.store(Count_ptr, True)
+        else:
+            o = tl.load(O_ptrs)
+            o = tl.dot(a, b, acc=o, allow_tf32=allow_tf32)
+            tl.store(O_ptrs, o, mask=mask)
+    tl.atomic_xchg(Lock_ptr, 0)
+
+
 
 @triton.jit
 # TODO add two-step lock?
@@ -76,12 +115,14 @@ def locked_add(Lock_ptr, Count_ptr,
             tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
             tl.store(B_ptrs, b + tl.load(B_ptrs, mask=mask), mask=mask)
     tl.atomic_xchg(Lock_ptr, 0)
+
+
     
 def get_configs():
     return [
         triton.Config({}, num_stages=s, num_warps=w)
-        for s in [4]
-        for w in [4]
+        for s in [4, 2, 3, 5, 6, 7, 8]
+        for w in [4, 2]
     ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"], 
                  reset_to_zero=["DK_ptr", "DV_ptr"])
@@ -279,7 +320,6 @@ def _backward_one_row(
             # N_mask=N_mask, NO_N_MASK=False,
             D_mask=D_mask, NO_D_MASK=NO_D_MASK
         )
-
         p, log_om_beta, neg_log_acc = compute_block(
             q, kT, qk_scale, neg_log_acc,
             M_blk_idxs, N_blk_idxs,
@@ -296,10 +336,11 @@ def _backward_one_row(
         # cumul_att_dA = tl.cumsum(att_dA, axis=1) + grad_prev_acc[:, None] # 180 -> 174
         grad_prev_acc += tl.sum(att_dA, axis=1)
         beta = 1 - tl.exp2(log_om_beta) # 180 -> 175
-        dqk = att_dA - beta * cumul_att_dA
-
-        dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
-        block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
+        dqk_scaled = att_dA - beta * cumul_att_dA
+        dqk_scaled *= logit_scale # do scaling at dqk
+        dq = tl.dot(dqk_scaled.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
+        block_dk = tl.dot(tl.trans(dqk_scaled.to(q.dtype)), q, allow_tf32=ALLOW_TF32)
+        # block_dk = tl.dot(tl.trans(dqk).to(q_scaled.dtype), q_scaled, allow_tf32=ALLOW_TF32)  * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
 
         locked_add(
@@ -317,7 +358,8 @@ def _backward_one_row(
         DK_blk_ptrs += BLOCK_N * stride_dkn
         DV_blk_ptrs += BLOCK_N * stride_dvn
 
-    dq = (logit_scale * dq).to(DQ_head_seq_ptr.type.element_ty)
+    # dq = (logit_scale * dq).to(DQ_head_seq_ptr.type.element_ty)
+    dq = dq.to(DQ_head_seq_ptr.type.element_ty)
 
     if NO_D_MASK:
         tl.store(DQ_blk_ptrs, dq, mask=M_mask[:, None])
