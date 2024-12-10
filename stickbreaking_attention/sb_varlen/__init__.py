@@ -43,11 +43,15 @@ class StickBreakingAttention(torch.autograd.Function):
     def backward(ctx, do, drem):
         logit_scale = ctx.logit_scale
         q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets = ctx.saved_tensors
+        BLOCK_M = 64
+        BLOCK_N = 16
+        seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
         dq, dk, dv = sb_bwd(
             do, drem,
             q, k, v,
             cu_seqlens, seq_program_offsets,
-            neg_log_acc, logit_scale
+            neg_log_acc, logit_scale,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N
         )
         return dq, dk, dv, None, None
 

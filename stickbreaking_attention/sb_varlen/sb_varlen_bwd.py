@@ -32,23 +32,21 @@ def locked_add(Lock_ptr, Count_ptr,
                N_mask, NO_N_MASK,
                D_mask, NO_D_MASK: tl.constexpr):
     """
-        With Lock
+    With Lock
         length  Stickbreaking  Flash Attention
-    0   4096.0      11.117788         4.148892
-    1   8192.0      43.532806        11.959753
-    2  12288.0     102.326492        24.255974
-    3  16384.0     192.534637        40.825050
-
-        Without lock
-            length  Stickbreaking  Flash Attention
-    0   4096.0       9.227353         4.143429
-    1   8192.0      36.784805        11.969437
-    2  12288.0      83.783920        24.314171
-    3  16384.0     150.149780        40.906620
+    0   4096.0       9.219444         4.147919
+    1   8192.0      35.851654        12.031645
+    2  12288.0      80.236732        24.233383
+    3  16384.0     142.758835        41.049843
+    Without lock
+        length  Stickbreaking  Flash Attention
+    0   4096.0       7.209363         4.156646
+    1   8192.0      27.947264        12.017864
+    2  12288.0      62.021461        24.382845
+    3  16384.0     110.561951        40.709171
     """
     while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
         pass
-
     count = tl.load(Count_ptr)
     if NO_D_MASK:
         if NO_N_MASK:
@@ -77,7 +75,6 @@ def locked_add(Lock_ptr, Count_ptr,
         else:
             tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
             tl.store(B_ptrs, b + tl.load(B_ptrs, mask=mask), mask=mask)
-
     tl.atomic_xchg(Lock_ptr, 0)
     
 def get_configs():
@@ -277,8 +274,8 @@ def _backward_one_row(
         # --- Recompute block ---
         kT, v = load_kv(
             KT_blk_ptrs, V_blk_ptrs,
-            # N_mask=N_mask, NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < sequence_end_offset,
-            N_mask=N_mask, NO_N_MASK=False,
+            N_mask=N_mask, NO_N_MASK=(N_blk_idxs_start + BLOCK_N - 1) < seq_length,
+            # N_mask=N_mask, NO_N_MASK=False,
             D_mask=D_mask, NO_D_MASK=NO_D_MASK
         )
 
@@ -293,14 +290,14 @@ def _backward_one_row(
         neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
 
         # --- Do gradient stuff ---
-        att_dA = p * (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32).to(do.dtype) - dr[:, None])
-        cumul_att_dA = tl.dot(att_dA.to(cm.dtype), tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+        att_dA = p * (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None])
+        # cumul_att_dA = tl.dot(att_dA.to(cm.dtype), tl.trans(cm), allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None] # 180 -> 174
+        cumul_att_dA = tl.cumsum(att_dA, axis=1) + grad_prev_acc[:, None] # 180 -> 174
         grad_prev_acc += tl.sum(att_dA, axis=1)
-        beta = 1 - tl.exp2(log_om_beta)
+        beta = 1 - tl.exp2(log_om_beta) # 180 -> 175
         dqk = att_dA - beta * cumul_att_dA
 
         dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
-
         block_dk = tl.dot(tl.trans(dqk), q.to(dqk.dtype), allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
         locked_add(
@@ -319,6 +316,7 @@ def _backward_one_row(
         DK_blk_ptrs += BLOCK_N * stride_dkn
         DV_blk_ptrs += BLOCK_N * stride_dvn
 
+
     dq = (logit_scale * dq).to(DQ_head_seq_ptr.type.element_ty)
 
     if NO_D_MASK:
@@ -328,7 +326,8 @@ def _backward_one_row(
 
 
 
-def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale=None):
+def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale=None,
+           BLOCK_M=16, BLOCK_N=16):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)
         num_heads = q.size(0)
@@ -336,9 +335,6 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
         dim_size = q.size(-1)
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
-
-        BLOCK_M = 64
-        BLOCK_N = 32
         BLOCK_D = triton.next_power_of_2(dim_size)
         # BLOCK_BATCH = triton.next_power_of_2(batch_size)
         M_count = triton.cdiv(token_size, BLOCK_M)
