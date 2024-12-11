@@ -20,12 +20,18 @@ def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
 
 
 class StickBreakingAttention(torch.autograd.Function):
+
+    FWD_BLOCK_M = 64
+    FWD_BLOCK_N = 32
+    BWD_BLOCK_M = 64
+    BWD_BLOCK_N = 32
+    
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens, inv_temp):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
-        BLOCK_M = 64
-        BLOCK_N = 32
+        BLOCK_M = StickBreakingAttention.FWD_BLOCK_M
+        BLOCK_N = StickBreakingAttention.FWD_BLOCK_N
         seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
         o, rem, neg_log_acc = sb_fwd(
             q, k, v,
@@ -43,9 +49,11 @@ class StickBreakingAttention(torch.autograd.Function):
     def backward(ctx, do, drem):
         logit_scale = ctx.logit_scale
         q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets = ctx.saved_tensors
-        BLOCK_M = 64
-        BLOCK_N = 32
-        seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
+        BLOCK_M = StickBreakingAttention.BWD_BLOCK_M
+        BLOCK_N = StickBreakingAttention.BWD_BLOCK_N
+
+        if StickBreakingAttention.BWD_BLOCK_M != StickBreakingAttention.FWD_BLOCK_M:
+            seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
         dq, dk, dv = sb_bwd(
             do, drem,
             q, k, v,

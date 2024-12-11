@@ -128,17 +128,16 @@ def get_configs():
                  reset_to_zero=["DK_ptr", "DV_ptr"])
 @triton.jit
 def _backward(
-    DO_ptr, stride_doh, stride_dom, stride_dod,
-    DR_ptr, stride_drh, stride_drm,
-    A_ptr, stride_ah, stride_am,
-    Q_ptr, stride_qh, stride_qm, stride_qd,
-    K_ptr, stride_kh, stride_kn, stride_kd,
-    V_ptr, stride_vh, stride_vn, stride_vd,
-    DQ_ptr, stride_dqh, stride_dqm, stride_dqd,
-    DK_ptr, stride_dkh, stride_dkn, stride_dkd,
-    DV_ptr, stride_dvh, stride_dvn, stride_dvd,
-    KV_Lock_ptr, KV_Count_ptr, stride_kvl,
-    W_ptr, stride_Wh, stride_Wm, stride_Wn,
+    DO_ptr, stride_doh, stride_dom: tl.constexpr, stride_dod: tl.constexpr,
+    DR_ptr, stride_drh, stride_drm: tl.constexpr,
+    A_ptr, stride_ah, stride_am: tl.constexpr,
+    Q_ptr, stride_qh, stride_qm: tl.constexpr, stride_qd: tl.constexpr,
+    K_ptr, stride_kh, stride_kn: tl.constexpr, stride_kd: tl.constexpr,
+    V_ptr, stride_vh, stride_vn: tl.constexpr, stride_vd: tl.constexpr,
+    DQ_ptr, stride_dqh, stride_dqm: tl.constexpr, stride_dqd: tl.constexpr,
+    DK_ptr, stride_dkh, stride_dkn: tl.constexpr, stride_dkd: tl.constexpr,
+    DV_ptr, stride_dvh, stride_dvn: tl.constexpr, stride_dvd: tl.constexpr,
+    KV_Lock_ptr, KV_Count_ptr, stride_kvl: tl.constexpr,
     CSL_ptr, CPO_ptr,
     logit_scale,
     batch_size,
@@ -214,8 +213,6 @@ def _backward(
         DK_head_seq_ptr, stride_dkn, stride_dkd,
         DV_head_seq_ptr, stride_dvn, stride_dvd,
         KV_Lock_head_seq_ptr, KV_Count_head_seq_ptr,
-        stride_kvl,
-        W_ptr, stride_Wh, stride_Wm, stride_Wn,
         logit_scale,
         BLOCK_D,
         NO_D_MASK,
@@ -236,14 +233,13 @@ def _backward_one_row(
     DO_head_seq_ptr, stride_dom, stride_dod,
     DR_head_seq_ptr, stride_drm,
     A_head_seq_ptr, stride_am,
-    Q_head_seq_ptr, stride_qm, stride_qd,
-    K_head_seq_ptr, stride_kn, stride_kd,
-    V_head_seq_ptr, stride_vn, stride_vd,
-    DQ_head_seq_ptr, stride_dqm, stride_dqd,
-    DK_head_seq_ptr, stride_dkn, stride_dkd,
-    DV_head_seq_ptr, stride_dvn, stride_dvd,
-    KV_Lock_ptr, KV_Count_ptr, stride_kvl,
-    W_ptr, stride_Wh, stride_Wm, stride_Wn,
+    Q_head_seq_ptr, stride_qm, stride_qd: tl.constexpr,
+    K_head_seq_ptr, stride_kn, stride_kd: tl.constexpr,
+    V_head_seq_ptr, stride_vn, stride_vd: tl.constexpr,
+    DQ_head_seq_ptr, stride_dqm, stride_dqd: tl.constexpr,
+    DK_head_seq_ptr, stride_dkn, stride_dkd: tl.constexpr,
+    DV_head_seq_ptr, stride_dvn, stride_dvd: tl.constexpr,
+    KV_Lock_ptr, KV_Count_ptr,
     logit_scale,
     BLOCK_D: tl.constexpr,
     NO_D_MASK: tl.constexpr,
@@ -261,7 +257,6 @@ def _backward_one_row(
 
     N_blk_idxs_start = 0
     N_blk_idxs = N_blk_idxs_start + N_range
-
 
     # Init pointers
     # Inputs
@@ -295,7 +290,6 @@ def _backward_one_row(
         do = tl.load(DO_blk_ptrs, mask=MD_mask)
         dr = tl.load(DR_blk_ptrs, mask=M_mask)
         neg_log_acc = tl.load(A_blk_ptrs, mask=M_mask)
-
     # --- End band vectors ---
 
     # Init accumulators
@@ -388,10 +382,13 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
 
         dkdv_lock = torch.zeros((num_heads, N_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_heads, N_count), dtype=torch.bool, device=q.device)
+        """
         if False:
             W = torch.zeros((num_heads, token_size, token_size), dtype=q.dtype, device=q.device) - 1
         else:
             W = torch.zeros((1, 1, 1), dtype=q.dtype, device=q.device)
+        """
+
         _backward[num_heads, M_count](
             # DO_ptr, stride_doh, stride_dom, stride_dod,
             do, do.stride(0), do.stride(1), do.stride(2),
@@ -413,7 +410,6 @@ def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_
             dv, dv.stride(0), dv.stride(1), dv.stride(2),
             # KV_Lock_ptr, KV_Count_ptr, stride_kvl,
             dkdv_lock, dkdv_count, dkdv_lock.stride(0),
-            W, W.stride(0), W.stride(1), W.stride(2),
             cu_seqlens, seq_program_offsets,
             logit_scale=logit_scale,
             batch_size=batch_size,
