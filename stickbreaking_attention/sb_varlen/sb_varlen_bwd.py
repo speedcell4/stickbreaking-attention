@@ -121,8 +121,8 @@ def locked_add(Lock_ptr, Count_ptr,
 def get_configs():
     return [
         triton.Config({}, num_stages=s, num_warps=w)
-        for s in [4]# , 2, 3, 5, 6, 7, 8]
-        for w in [4]# , 2]
+        for s in [8]
+        for w in [4]
     ]
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"], 
                  reset_to_zero=["DK_ptr", "DV_ptr"])
@@ -322,7 +322,8 @@ def _backward_one_row(
             backward=True
         )
 
-        neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
+        if not NO_M_MASK:
+            neg_log_acc = tl.where(M_mask, neg_log_acc, 0.)
 
         # --- Do gradient stuff ---
         att_dA = p * (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None])
@@ -331,8 +332,8 @@ def _backward_one_row(
         grad_prev_acc += tl.sum(att_dA, axis=1)
         beta = 1 - tl.exp2(log_om_beta) # 180 -> 175
         dqk = att_dA - beta * cumul_att_dA
+
         dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
-        # block_dk = tl.dot(tl.trans(dqk.to(q.dtype)), q, allow_tf32=ALLOW_TF32)
         block_dk = tl.dot(tl.trans(dqk).to(q.dtype), q, allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
         locked_add(
@@ -360,7 +361,7 @@ def _backward_one_row(
 
 
 def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale=None,
-           BLOCK_M=16, BLOCK_N=16):
+           BLOCK_M=64, BLOCK_N=32):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)
         num_heads = q.size(0)
