@@ -44,7 +44,7 @@ class StickBreakingAttention(torch.autograd.Function):
         logit_scale = ctx.logit_scale
         q, k, v, neg_log_acc, cu_seqlens, seq_program_offsets = ctx.saved_tensors
         BLOCK_M = 64
-        BLOCK_N = 16
+        BLOCK_N = 32
         seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
         dq, dk, dv = sb_bwd(
             do, drem,
