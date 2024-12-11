@@ -75,12 +75,12 @@ def get_configs():
 @triton.autotune(configs=get_configs(), key=["token_size", "head_size"])
 @triton.jit
 def _forward(
-    Q_ptr, stride_qh, stride_qm, stride_qd,
-    K_ptr, stride_kh, stride_kn, stride_kd,
-    V_ptr, stride_vh, stride_vn, stride_vd,
-    O_ptr, stride_oh, stride_om, stride_od,
-    R_ptr, stride_rh, stride_rm,
-    A_ptr, stride_ah, stride_am,
+    Q_ptr, stride_qh, stride_qm: tl.constexpr, stride_qd: tl.constexpr,
+    K_ptr, stride_kh, stride_kn: tl.constexpr, stride_kd: tl.constexpr,
+    V_ptr, stride_vh, stride_vn: tl.constexpr, stride_vd: tl.constexpr,
+    O_ptr, stride_oh, stride_om: tl.constexpr, stride_od: tl.constexpr,
+    R_ptr, stride_rh, stride_rm: tl.constexpr,
+    A_ptr, stride_ah, stride_am: tl.constexpr,
     W_ptr, stride_wh, stride_wm, stride_wn,
     CSL_ptr, CPO_ptr,
     # pid_debug_ptr,
