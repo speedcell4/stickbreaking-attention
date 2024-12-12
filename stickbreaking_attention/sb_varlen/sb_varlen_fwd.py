@@ -83,7 +83,6 @@ def _forward(
     A_ptr, stride_ah, stride_am: tl.constexpr,
     W_ptr, stride_wh, stride_wm, stride_wn,
     CSL_ptr, CPO_ptr,
-    # pid_debug_ptr,
     logit_scale: tl.constexpr,
     batch_size,
     token_size,
@@ -288,7 +287,7 @@ def _forward_one_row(
     else:
         tl.store(O_blk_ptrs, acc.to(O_head_seq_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
-
+@torch.compile
 def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
            no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32):
     with torch.cuda.device(q.device):
@@ -310,7 +309,7 @@ def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
             W = torch.empty((1, 1, 1), device=q.device)
 
         num_folded_heads = triton.cdiv(num_heads, 2)
-        num_seq_blocks = seq_program_offsets[-1]
+        num_seq_blocks = seq_program_offsets[-1].item()
         grid = (num_folded_heads, num_seq_blocks)
         _forward[grid](
             q, q.stride(0), q.stride(1), q.stride(2),
@@ -338,6 +337,7 @@ def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2,
             return_attention=return_attention,
+            acc_dtype=tl.float32
         )
         if return_attention:
             return o, rem, neg_log_acc, W
