@@ -38,6 +38,7 @@ def _forward(
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
+    is_compiling: tl.constexpr = False
 ): 
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     batch_id = tl.program_id(0)
@@ -82,6 +83,7 @@ def _forward(
         BLOCK_M, BLOCK_N,
         no_grad, acc_dtype,
         return_attention,
+        is_compiling=is_compiling
     )
 
 def _fwd(q, k, v, logit_scale,
@@ -124,7 +126,8 @@ def _fwd(q, k, v, logit_scale,
         ALLOW_TF32=ALLOW_TF32,
         inv_log2=inv_log2,
         return_attention=return_attention,
-        acc_dtype=tl.float32
+        acc_dtype=tl.float32,
+        is_compiling=torch.compiler.is_compiling()
     )
     if return_attention:
         return o, rem, neg_log_acc, W

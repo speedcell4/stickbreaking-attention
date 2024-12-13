@@ -87,7 +87,7 @@ class TestClass:
         k.requires_grad_()
         v.requires_grad_()
         do = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
-        with torch.cuda.device():
+        with torch.cuda.device(device):
             o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
                                     inv_temp=1 / math.sqrt(q.size(-1)),
                                     zero_start=False)

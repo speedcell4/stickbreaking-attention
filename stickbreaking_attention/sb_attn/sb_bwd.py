@@ -42,6 +42,7 @@ def _backward(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     acc_dtype: tl.constexpr = tl.float32,
+    is_compiling: tl.constexpr = False,
 ):
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     batch_id = tl.program_id(0)
@@ -94,6 +95,7 @@ def _backward(
         BLOCK_M,
         BLOCK_N,
         acc_dtype,
+        is_compiling=is_compiling
     )
 
 def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, strides=None):
@@ -150,7 +152,8 @@ def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, str
             NO_N_MASK=(token_size % BLOCK_N) == 0,
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2,
-            acc_dtype=tl.float32
+            acc_dtype=tl.float32,
+            is_compiling=torch.compiler.is_compiling()
         )
         return dq, dk, dv
 

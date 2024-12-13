@@ -248,6 +248,7 @@ def _backward_one_row(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     acc_dtype: tl.constexpr = tl.float32,
+    is_compiling: tl.constexpr = False,
 ):
     # Loading thread information
     block_start_offset = BLOCK_M * seq_prog_id
@@ -319,7 +320,8 @@ def _backward_one_row(
             M_blk_idxs, N_blk_idxs,
             cm, on_band,
             ALLOW_TF32,
-            backward=True
+            backward=True,
+            is_compiling=is_compiling
         )
 
         if not NO_M_MASK:

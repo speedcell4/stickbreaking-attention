@@ -29,11 +29,12 @@ def compute_block(
         cm, on_band,
         ALLOW_TF32: tl.constexpr,
         backward: tl.constexpr,
-        use_cumsum: tl.constexpr = False):
+        use_cumsum: tl.constexpr = False, 
+        is_compiling: tl.constexpr = False):
 
     qk = tl.dot(q, kT, allow_tf32=ALLOW_TF32) * qk_scale
 
-    log_om_beta = -softplus(qk) # log_om_beta (one minus beta) : log(1 - \beta)
+    log_om_beta = -softplus(qk, is_compiling=is_compiling) # log_om_beta (one minus beta) : log(1 - \beta)
 
     if on_band:
         block_mask = M_blk_idxs[:, None] > N_blk_idxs[None, :] # diagonal
@@ -215,6 +216,7 @@ def _forward_one_row(
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
+    is_compiling: tl.constexpr = False
 ):
     # Loading thread information
     block_start_offset = BLOCK_M * seq_prog_id
@@ -266,7 +268,8 @@ def _forward_one_row(
             M_blk_idxs, N_blk_idxs,
             cm, on_band,
             ALLOW_TF32,
-            backward=False
+            backward=False,
+            is_compiling=is_compiling
         )
         # Store intermediate values
         acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
