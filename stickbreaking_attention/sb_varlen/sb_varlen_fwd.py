@@ -274,7 +274,7 @@ def _forward_one_row(
             tl.store(
                 W_head_seq_ptr + stride_wm * M_blk_idxs[:, None] + stride_wn * N_blk_idxs[None, :],
                 p,
-                mask=(M_blk_idxs < sequence_end_offset)[:, None] & (N_blk_idxs < seq_length)[None, :]
+                mask=(M_blk_idxs < seq_length)[:, None] & (N_blk_idxs < seq_length)[None, :]
             )
     if NO_M_MASK:
         tl.store(R_blk_ptrs, tl.math.exp2(neg_log_acc))
@@ -287,61 +287,60 @@ def _forward_one_row(
     else:
         tl.store(O_blk_ptrs, acc.to(O_head_seq_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
-@torch.compile
-def sb_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
+# @torch.compile(fullgraph=True)
+def varlen_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
            no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32):
-    with torch.cuda.device(q.device):
-        num_heads = q.size(0)
-        batch_size = cu_seqlens.size(0)
-        token_size = q.size(1)
-        dim_size = q.size(-1)
-        BLOCK_D = triton.next_power_of_2(dim_size)
+    num_heads = q.size(0)
+    batch_size = cu_seqlens.size(0)
+    token_size = q.size(1)
+    dim_size = q.size(-1)
+    BLOCK_D = triton.next_power_of_2(dim_size)
+    BLOCK_CSL = triton.next_power_of_2(batch_size)
+    if logit_scale is None:
+        logit_scale = 1 / math.sqrt(dim_size)
 
-        if logit_scale is None:
-            logit_scale = 1 / math.sqrt(dim_size)
+    o = torch.empty_like(q)
+    rem = torch.zeros_like(q[:, :, 0], device=q.device)
+    neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
+    if return_attention:
+        W = torch.full((num_heads, token_size, token_size), 0., dtype=torch.float32, device=q.device)
+    else:
+        W = torch.empty((1, 1, 1), device=q.device)
 
-        o = torch.empty_like(q)
-        rem = torch.zeros_like(q[:, :, 0], device=q.device)
-        neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
-        if return_attention:
-            W = torch.full((num_heads, token_size, token_size), 0., dtype=torch.float32, device=q.device)
-        else:
-            W = torch.empty((1, 1, 1), device=q.device)
-
-        num_folded_heads = triton.cdiv(num_heads, 2)
-        num_seq_blocks = seq_program_offsets[-1].item()
-        grid = (num_folded_heads, num_seq_blocks)
-        _forward[grid](
-            q, q.stride(0), q.stride(1), q.stride(2),
-            k, k.stride(0), k.stride(1), k.stride(2),
-            v, v.stride(0), v.stride(1), v.stride(2),
-            o, o.stride(0), o.stride(1), o.stride(2),
-            rem, rem.stride(0), rem.stride(1),
-            neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
-            W, W.stride(0), W.stride(1), W.stride(2),
-            cu_seqlens, seq_program_offsets,
-            # pid_debug,
-            logit_scale=logit_scale,
-            batch_size=batch_size,
-            token_size=token_size,
-            head_size=dim_size,
-            num_heads=num_heads,
-            no_grad=no_grad,
-            BLOCK_D=BLOCK_D,
-            BLOCK_CSL=triton.next_power_of_2(batch_size),
-            NO_D_MASK=BLOCK_D == dim_size,
-            NO_M_MASK=(token_size % BLOCK_M) == 0,
-            NO_N_MASK=(token_size % BLOCK_N) == 0,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            ALLOW_TF32=ALLOW_TF32,
-            inv_log2=inv_log2,
-            return_attention=return_attention,
-            acc_dtype=tl.float32
-        )
-        if return_attention:
-            return o, rem, neg_log_acc, W
-        else:
-            return o, rem, neg_log_acc
+    num_folded_heads = triton.cdiv(num_heads, 2)
+    num_seq_blocks = seq_program_offsets[-1].item()
+    grid = (num_folded_heads, num_seq_blocks)
+    _forward[grid](
+        q, q.stride(0), q.stride(1), q.stride(2),
+        k, k.stride(0), k.stride(1), k.stride(2),
+        v, v.stride(0), v.stride(1), v.stride(2),
+        o, o.stride(0), o.stride(1), o.stride(2),
+        rem, rem.stride(0), rem.stride(1),
+        neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
+        W, W.stride(0), W.stride(1), W.stride(2),
+        cu_seqlens, seq_program_offsets,
+        # pid_debug,
+        logit_scale=logit_scale,
+        batch_size=batch_size,
+        token_size=token_size,
+        head_size=dim_size,
+        num_heads=num_heads,
+        no_grad=no_grad,
+        BLOCK_D=BLOCK_D,
+        BLOCK_CSL=BLOCK_CSL,
+        NO_D_MASK=BLOCK_D == dim_size,
+        NO_M_MASK=(token_size % BLOCK_M) == 0,
+        NO_N_MASK=(token_size % BLOCK_N) == 0,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        ALLOW_TF32=ALLOW_TF32,
+        inv_log2=inv_log2,
+        return_attention=return_attention,
+        acc_dtype=tl.float32
+    )
+    if return_attention:
+        return o, rem, neg_log_acc, W
+    else:
+        return o, rem, neg_log_acc
 
 

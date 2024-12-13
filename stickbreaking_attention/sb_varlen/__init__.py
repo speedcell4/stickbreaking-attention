@@ -5,11 +5,10 @@ from torch.nn import functional as F
 
 log2 = math.log(2)
 inv_log2 = 1 / log2
-ALLOW_TF32 = True
+ALLOW_TF32 = False
 
-from .sb_varlen_fwd import sb_fwd
-from .sb_varlen_bwd import sb_bwd
-
+from .sb_varlen_fwd import varlen_fwd
+from .sb_varlen_bwd import varlen_bwd
 
 def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
     lens = cu_seqlens.clone()
@@ -33,7 +32,7 @@ class StickBreakingAttention(torch.autograd.Function):
         BLOCK_M = StickBreakingAttention.FWD_BLOCK_M
         BLOCK_N = StickBreakingAttention.FWD_BLOCK_N
         seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
-        o, rem, neg_log_acc = sb_fwd(
+        o, rem, neg_log_acc = varlen_fwd(
             q, k, v,
             cu_seqlens,
             seq_program_offsets + torch.arange(seq_program_offsets.size(0), device=q.device) + 1,
@@ -54,7 +53,7 @@ class StickBreakingAttention(torch.autograd.Function):
 
         if StickBreakingAttention.BWD_BLOCK_M != StickBreakingAttention.FWD_BLOCK_M:
             seq_program_offsets = calculate_programs_needed(cu_seqlens, BLOCK_SIZE=BLOCK_M)
-        dq, dk, dv = sb_bwd(
+        dq, dk, dv = varlen_bwd(
             do, drem,
             q, k, v,
             cu_seqlens, seq_program_offsets,

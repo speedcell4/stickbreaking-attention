@@ -105,11 +105,12 @@ class TestClass:
         k.requires_grad_()
         v.requires_grad_()
         do = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
-        o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
-                                inv_temp=1 / math.sqrt(q.size(-1)),
-                                zero_start=False)
-        o = o + rem[..., None] * v
-        ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
+        with torch.cuda.device():
+            o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
+                                    inv_temp=1 / math.sqrt(q.size(-1)),
+                                    zero_start=False)
+            o = o + rem[..., None] * v
+            ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
         eps = 0.05
         torch.cuda.synchronize()
         assert_close("o", ref_out, o, eps)

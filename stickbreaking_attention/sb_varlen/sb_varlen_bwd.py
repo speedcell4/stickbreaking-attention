@@ -360,7 +360,7 @@ def _backward_one_row(
 
 
 
-def sb_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale=None,
+def varlen_bwd(do, dr, q, k, v, cu_seqlens, seq_program_offsets, neg_log_acc, logit_scale=None,
            BLOCK_M=64, BLOCK_N=32):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)

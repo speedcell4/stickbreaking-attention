@@ -28,7 +28,8 @@ asm_str: tl.constexpr = _generate_asm(NUM_REG)
 constraints_str: tl.constexpr = _generate_constraints(NUM_REG)
 @triton.jit
 def softplus(x):
-    # out = tl.where(x < 15., tl.math.log2(1 + tl.math.exp2(x)), x)
+    out = tl.where(x < 15., tl.math.log2(1 + tl.math.exp2(x)), x)
+    """
     out = tl.inline_asm_elementwise(
         asm=asm_str,
         constraints=constraints_str,
@@ -36,5 +37,5 @@ def softplus(x):
         args=[x,],
         dtype=tl.float32,
         is_pure=True,
-    ) 
+    )"""
     return out
