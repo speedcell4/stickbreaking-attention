@@ -5,7 +5,7 @@ from torch.nn import functional as F
 
 log2 = math.log(2)
 inv_log2 = 1 / log2
-ALLOW_TF32 = False
+ALLOW_TF32 = True
 
 from .sb_varlen_fwd import varlen_fwd
 from .sb_varlen_bwd import varlen_bwd
