@@ -3,7 +3,7 @@ import pytest
 import math
 from stickbreaking_attention.sb_attn import sb_attn
 from transformers import set_seed
-from . import stickbreaking
+from stickbreaking_attention.sb_ref import stickbreaking
 from .test_varlen import assert_close
 
 

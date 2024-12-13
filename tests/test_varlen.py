@@ -4,7 +4,7 @@ import math
 from torch.nn import functional as F
 from stickbreaking_attention.sb_varlen import sb_attn_varlen
 from transformers import set_seed
-from . import stickbreaking
+from stickbreaking_attention.sb_ref import stickbreaking
 
 
 def ref_fwd(q, k, v, lengths, attend_current=False):

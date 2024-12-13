@@ -21,7 +21,7 @@ def _generate_asm(num_pack):
     return out_str
 
 def _generate_constraints(num_pack):
-    return ','.join("=r" for i in range(num_pack)) + "," +','.join('r' for i in range(num_pack))
+    return ','.join("=r" for i in range(num_pack)) + "," + ','.join('r' for i in range(num_pack))
 
 NUM_REG: tl.constexpr = 1
 asm_str: tl.constexpr = _generate_asm(NUM_REG)
@@ -45,6 +45,3 @@ def softplus(x, is_compiling: tl.constexpr = False):
             is_pure=True,
         )
         return out
-
-
-

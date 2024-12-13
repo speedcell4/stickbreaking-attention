@@ -4,31 +4,11 @@ import math
 from torch.nn import functional as F
 from stickbreaking_attention.sb_varlen import sb_attn_varlen
 import triton
-import triton.language as tl
 from flash_attn import flash_attn_varlen_func
-from torch import nn
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, rotate_half
 from transformers import set_seed
+from stickbreaking_attention.sb_ref import stickbreaking
 
-
-# for reference
-def stickbreaking(q, k, v, mask, cum_weight):
-    """
-    Stick-breaking attention weights.
-    """
-    logits = (q @ k.transpose(-1, -2)) / math.sqrt(q.shape[-1])
-
-    original_dtype = logits.dtype
-
-    logits = logits.float()
-    log_z = F.logsigmoid(logits).masked_fill(mask, -1e5).to(original_dtype)
-
-    log_beta = F.logsigmoid(-logits).masked_fill(mask, 0).to(original_dtype)
-
-    re_cum_log_beta = torch.einsum('bhij,jk->bhik', log_beta, cum_weight.to(log_beta))
-    log_att = log_z + re_cum_log_beta
-    att = log_att.exp()
-    return att @ v, 1 - att.sum(dim=-1)
 
 
 def ref_fwd(q, k, v, lengths):

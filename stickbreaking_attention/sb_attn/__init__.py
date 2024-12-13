@@ -43,11 +43,12 @@ class StickBreakingAttention(torch.autograd.Function):
         )
         return dq, dk, dv, None
 
-# @torch.compile(fullgraph=True)    
+
 def sb_attn(q, k, v, inv_temp=None, zero_start=True):
     if inv_temp is None:
         inv_temp = 1 / math.sqrt(q.size(-1))
     return sb_attn_(q, k, v, inv_temp)
+
 
 def sb_attn_(q, k, v, inv_temp):
     return StickBreakingAttention.apply(q, k, v, inv_temp)
