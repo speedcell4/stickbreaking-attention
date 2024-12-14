@@ -42,7 +42,9 @@ def tri_fwdbwd(do, q, k, v, lengths):
     k = k.permute(1, 0, 2)
     v = v.permute(1, 0, 2)
     cu_seqlens = torch.cumsum(lengths, dim=-1)
-    o, rem = sb_attn_varlen(q, k, v, cu_seqlens,
+    o, rem = sb_attn_varlen(q, k, v,
+                            cu_seqlens=cu_seqlens,
+                            max_seqlens=max(lengths),
                             inv_temp=1 / math.sqrt(q.size(-1)),
                             zero_start=False)
     # o = o + rem[..., None] * v
@@ -83,7 +85,7 @@ providers = [
         styles=[x[2] for x in providers],
         ylabel="ms",
         plot_name=f"triton v torch",
-        args={"batch_size": 4, "num_heads": 12, "head_dim": 128, "dtype": torch.bfloat16, "bwd": True}
+        args={"batch_size": 4, "num_heads": 12, "head_dim": 128, "dtype": torch.bfloat16, "bwd": False}
     )
 ])
 def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, bwd):

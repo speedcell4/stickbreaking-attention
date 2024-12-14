@@ -83,7 +83,7 @@ def _forward(
     R_ptr, stride_rh, stride_rm: tl.constexpr,
     A_ptr, stride_ah, stride_am: tl.constexpr,
     W_ptr, stride_wh, stride_wm, stride_wn,
-    CSL_ptr, CPO_ptr,
+    CSL_ptr,
     logit_scale: tl.constexpr,
     batch_size,
     token_size,
@@ -103,36 +103,31 @@ def _forward(
     return_attention: tl.constexpr = False,
 ): 
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
-    head_pid = tl.program_id(0)
-    prog_id = tl.program_id(1)
+    seq_id = tl.program_id(0)
+    fhead_id = tl.program_id(1)
+    seq_alloc_prog_id = tl.program_id(2)
+    num_seq_alloc_progs = tl.num_programs(2)
     # Universal stuff
     qk_scale = inv_log2 * logit_scale
     M_range = tl.arange(0, BLOCK_M)
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
-    CSL_range = tl.arange(0, BLOCK_CSL)
     D_mask = D_range < head_size
     cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
 
-    block_offsets = tl.load(CPO_ptr + CSL_range, mask=CSL_range < batch_size, other=tl.num_programs(1))
-    seq_id = tl.sum((prog_id >= block_offsets).to(tl.int32), axis=0) # lookup sequence in batch
     if seq_id == 0:
         seq_start_offset = 0
-        prog_id_start_offset = 0
     else:
         seq_start_offset = tl.load(CSL_ptr + seq_id - 1).to(tl.int32)
-        prog_id_start_offset = tl.load(CPO_ptr + seq_id - 1).to(tl.int32)
     seq_end_offset = tl.load(CSL_ptr + seq_id).to(tl.int32)
-    prog_id_end_offset = tl.load(CPO_ptr + seq_id).to(tl.int32)
     seq_length = seq_end_offset - seq_start_offset
-    seq_num_progs = prog_id_end_offset - prog_id_start_offset
+    num_seq_blocks = tl.cdiv(seq_length, BLOCK_M)
 
-    # pid = tl.program_id(0) * tl.num_programs(1) + tl.program_id(1) # TODO debug
-    seq_alloc_prog_id = prog_id - prog_id_start_offset
-    if seq_alloc_prog_id > 0:
+    seq_a_block_id = num_seq_blocks - seq_alloc_prog_id - 1
+    seq_b_block_id = seq_alloc_prog_id - (num_seq_alloc_progs- num_seq_blocks)
+    if seq_a_block_id >= 0:
         # First head block
-        head_id = head_pid * 2
-        seq_prog_id = prog_id - prog_id_start_offset - 1
+        head_id = fhead_id * 2
         # tl.store(pid_debug_ptr + head_id * tl.num_programs(1) + prog_id_start_offset + seq_prog_id, pid)
         Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
         K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
@@ -142,7 +137,7 @@ def _forward(
         A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
         W_head_seq_ptr = W_ptr + stride_wh * head_id + stride_am * seq_start_offset
         _forward_one_row(
-            seq_prog_id, seq_length,
+            seq_a_block_id, seq_length,
             qk_scale,
             M_range, N_range,
             D_range, D_mask, cm,
@@ -160,10 +155,9 @@ def _forward(
             no_grad, acc_dtype,
             return_attention,
         )
-    if seq_num_progs - seq_alloc_prog_id - 1 > 0 and head_pid * 2 + 1 < num_heads:
+    if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
         # Reverse head block
-        head_id = head_pid * 2 + 1
-        seq_prog_id = seq_num_progs - seq_alloc_prog_id - 1 - 1 # reverse ids
+        head_id = fhead_id * 2 + 1
         # tl.store(pid_debug_ptr + head_id * tl.num_programs(1) + prog_id_start_offset + seq_prog_id, pid)
         Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
         K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
@@ -173,7 +167,7 @@ def _forward(
         A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
         W_head_seq_ptr = W_ptr + stride_wh * head_id + stride_am * seq_start_offset
         _forward_one_row(
-            seq_prog_id, seq_length,
+            seq_b_block_id, seq_length,
             qk_scale,
             M_range, N_range,
             D_range, D_mask, cm,
@@ -195,7 +189,7 @@ def _forward(
 
 @triton.jit
 def _forward_one_row(
-    seq_prog_id, seq_length,
+    seq_block_id, seq_length,
     qk_scale,
     M_range, N_range,
     D_range, D_mask, cm,
@@ -219,7 +213,7 @@ def _forward_one_row(
     is_compiling: tl.constexpr = False
 ):
     # Loading thread information
-    block_start_offset = BLOCK_M * seq_prog_id
+    block_start_offset = BLOCK_M * seq_block_id
     M_blk_idxs = block_start_offset + M_range
     M_mask = M_blk_idxs < seq_length
     NO_M_MASK = ((block_start_offset + BLOCK_M - 1) < seq_length)
@@ -291,7 +285,7 @@ def _forward_one_row(
         tl.store(O_blk_ptrs, acc.to(O_head_seq_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
 # @torch.compile(fullgraph=True)
-def varlen_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
+def varlen_fwd(q, k, v, cu_seqlens, max_seqlens, logit_scale,
            no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32):
     num_heads = q.size(0)
     batch_size = cu_seqlens.size(0)
@@ -299,9 +293,6 @@ def varlen_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
     dim_size = q.size(-1)
     BLOCK_D = triton.next_power_of_2(dim_size)
     BLOCK_CSL = triton.next_power_of_2(batch_size)
-    if logit_scale is None:
-        logit_scale = 1 / math.sqrt(dim_size)
-
     o = torch.empty_like(q)
     rem = torch.zeros_like(q[:, :, 0], device=q.device)
     neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
@@ -310,9 +301,10 @@ def varlen_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
     else:
         W = torch.empty((1, 1, 1), device=q.device)
 
+    num_sequences = batch_size
     num_folded_heads = triton.cdiv(num_heads, 2)
-    num_seq_blocks = seq_program_offsets[-1].item()
-    grid = (num_folded_heads, num_seq_blocks)
+    num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
+    grid = (num_sequences, num_folded_heads, num_seq_blocks)
     _forward[grid](
         q, q.stride(0), q.stride(1), q.stride(2),
         k, k.stride(0), k.stride(1), k.stride(2),
@@ -321,7 +313,7 @@ def varlen_fwd(q, k, v, cu_seqlens, seq_program_offsets, logit_scale,
         rem, rem.stride(0), rem.stride(1),
         neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1),
         W, W.stride(0), W.stride(1), W.stride(2),
-        cu_seqlens, seq_program_offsets,
+        cu_seqlens,
         # pid_debug,
         logit_scale=logit_scale,
         batch_size=batch_size,
