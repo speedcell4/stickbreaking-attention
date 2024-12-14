@@ -5,6 +5,8 @@ import triton.language as tl
 from . import log2, inv_log2, ALLOW_TF32
 from .softplus import softplus
 
+torch._dynamo.config.cache_size_limit = 64
+
 @triton.jit
 def load_kv(KT_blk_ptrs, V_blk_ptrs,
             N_mask, NO_N_MASK,
@@ -90,7 +92,6 @@ def _forward(
     head_size: tl.constexpr,
     num_heads: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    BLOCK_CSL: tl.constexpr,
     NO_D_MASK: tl.constexpr,
     NO_M_MASK: tl.constexpr,
     NO_N_MASK: tl.constexpr,
@@ -124,11 +125,10 @@ def _forward(
     num_seq_blocks = tl.cdiv(seq_length, BLOCK_M)
 
     seq_a_block_id = num_seq_blocks - seq_alloc_prog_id - 1
-    seq_b_block_id = seq_alloc_prog_id - (num_seq_alloc_progs- num_seq_blocks)
+    seq_b_block_id = seq_alloc_prog_id - (num_seq_alloc_progs - num_seq_blocks)
     if seq_a_block_id >= 0:
         # First head block
         head_id = fhead_id * 2
-        # tl.store(pid_debug_ptr + head_id * tl.num_programs(1) + prog_id_start_offset + seq_prog_id, pid)
         Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
         K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
         V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
@@ -158,7 +158,6 @@ def _forward(
     if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
         # Reverse head block
         head_id = fhead_id * 2 + 1
-        # tl.store(pid_debug_ptr + head_id * tl.num_programs(1) + prog_id_start_offset + seq_prog_id, pid)
         Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
         K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
         V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
@@ -284,15 +283,13 @@ def _forward_one_row(
     else:
         tl.store(O_blk_ptrs, acc.to(O_head_seq_ptr.type.element_ty), mask=M_mask[:, None] & D_mask[None, :])
 
-# @torch.compile(fullgraph=True)
-def varlen_fwd(q, k, v, cu_seqlens, max_seqlens, logit_scale,
-           no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32):
-    num_heads = q.size(0)
+
+def varlen_fwd(
+        q, k, v, cu_seqlens, max_seqlens, logit_scale,
+        no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32
+    ):
     batch_size = cu_seqlens.size(0)
-    token_size = q.size(1)
-    dim_size = q.size(-1)
-    BLOCK_D = triton.next_power_of_2(dim_size)
-    BLOCK_CSL = triton.next_power_of_2(batch_size)
+    num_heads, token_size, dim_size = q.size()
     o = torch.empty_like(q)
     rem = torch.zeros_like(q[:, :, 0], device=q.device)
     neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
@@ -301,9 +298,38 @@ def varlen_fwd(q, k, v, cu_seqlens, max_seqlens, logit_scale,
     else:
         W = torch.empty((1, 1, 1), device=q.device)
 
+    _compileable_forward(q, k, v, cu_seqlens, max_seqlens,
+                         logit_scale, no_grad, return_attention, BLOCK_M, BLOCK_N,
+                         num_heads, batch_size, token_size, dim_size,
+                         o, rem, neg_log_acc, W)
+    if return_attention:
+        return o, rem, neg_log_acc, W
+    else:
+        return o, rem, neg_log_acc
+
+
+@torch.library.custom_op("stickbreaking_attention::forward_varlen",
+                         mutates_args={"o", "rem", "neg_log_acc", "W"})
+def _compileable_forward(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    cu_seqlens: torch.Tensor, max_seqlens: torch.Tensor,
+    logit_scale: float,
+    no_grad: bool,
+    return_attention: bool,
+    BLOCK_M: int, BLOCK_N: int,
+    num_heads: int,
+    batch_size: int,
+    token_size: int,
+    dim_size: int,
+    o: torch.Tensor,
+    rem: torch.Tensor,
+    neg_log_acc: torch.Tensor,
+    W: torch.Tensor
+) -> None:
     num_sequences = batch_size
     num_folded_heads = triton.cdiv(num_heads, 2)
     num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
+    BLOCK_D = triton.next_power_of_2(dim_size)
     grid = (num_sequences, num_folded_heads, num_seq_blocks)
     _forward[grid](
         q, q.stride(0), q.stride(1), q.stride(2),
@@ -322,7 +348,6 @@ def varlen_fwd(q, k, v, cu_seqlens, max_seqlens, logit_scale,
         num_heads=num_heads,
         no_grad=no_grad,
         BLOCK_D=BLOCK_D,
-        BLOCK_CSL=BLOCK_CSL,
         NO_D_MASK=BLOCK_D == dim_size,
         NO_M_MASK=(token_size % BLOCK_M) == 0,
         NO_N_MASK=(token_size % BLOCK_N) == 0,
@@ -333,9 +358,3 @@ def varlen_fwd(q, k, v, cu_seqlens, max_seqlens, logit_scale,
         return_attention=return_attention,
         acc_dtype=tl.float32
     )
-    if return_attention:
-        return o, rem, neg_log_acc, W
-    else:
-        return o, rem, neg_log_acc
-
-

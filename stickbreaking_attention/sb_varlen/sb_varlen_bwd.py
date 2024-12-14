@@ -295,7 +295,6 @@ def varlen_bwd(do, dr, q, k, v, cu_seqlens, max_seqlens, neg_log_acc, logit_scal
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
         BLOCK_D = triton.next_power_of_2(dim_size)
-        M_count = triton.cdiv(token_size, BLOCK_M)
         N_count = triton.cdiv(token_size, BLOCK_N)
 
         dq = torch.empty_like(q)
