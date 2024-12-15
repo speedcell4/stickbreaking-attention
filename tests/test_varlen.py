@@ -66,7 +66,7 @@ class TestClass:
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
     @pytest.mark.parametrize('dtype', [torch.bfloat16])
-    @pytest.mark.parametrize('forward_only', [True])
+    @pytest.mark.parametrize('forward_only', [False])
     def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
         set_seed(1337)
         torch.set_printoptions(linewidth=110, edgeitems=30)
@@ -90,7 +90,7 @@ class TestClass:
         with torch.cuda.device(device):
             o, rem = sb_attn_varlen(q, k, v,
                                     cu_seqlens=cu_seqlens,
-                                    max_seqlens=torch.max(lengths),
+                                    max_seqlens=torch.max(lengths).item(),
                                     inv_temp=1 / math.sqrt(q.size(-1)),
                                     zero_start=False)
             o = o + rem[..., None] * v

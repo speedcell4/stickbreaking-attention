@@ -281,6 +281,7 @@ def _forward(
             return_attention,
         )
 
+# @torch.compile(fullgraph=True)
 def varlen_fwd(
         q, k, v, cu_seqlens, max_seqlens, logit_scale,
         no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32
@@ -305,11 +306,11 @@ def varlen_fwd(
         return o, rem, neg_log_acc
 
 
-@torch.library.custom_op("stickbreaking_attention::forward_varlen",
+@torch.library.custom_op("stickbreaking_attention::varlen_fwd",
                          mutates_args={"o", "rem", "neg_log_acc", "W"})
 def _compileable_forward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    cu_seqlens: torch.Tensor, max_seqlens: torch.Tensor,
+    cu_seqlens: torch.Tensor, max_seqlens: int,
     logit_scale: float,
     no_grad: bool,
     return_attention: bool,

@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 from . import log2, inv_log2, ALLOW_TF32
 from .sb_varlen_fwd import load_kv, compute_block
+from typing import Tuple
 
 
 @triton.jit
@@ -285,7 +286,6 @@ def _backward_one_row(
         tl.store(DQ_blk_ptrs, dq, mask=M_mask[:, None] & D_mask[None, :])
 
 
-
 def varlen_bwd(do, dr, q, k, v, cu_seqlens, max_seqlens, neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)
@@ -294,7 +294,6 @@ def varlen_bwd(do, dr, q, k, v, cu_seqlens, max_seqlens, neg_log_acc, logit_scal
         dim_size = q.size(-1)
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
-        BLOCK_D = triton.next_power_of_2(dim_size)
         N_count = triton.cdiv(token_size, BLOCK_N)
 
         dq = torch.empty_like(q)
@@ -305,10 +304,31 @@ def varlen_bwd(do, dr, q, k, v, cu_seqlens, max_seqlens, neg_log_acc, logit_scal
         num_folded_heads = num_heads
         num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M)
         N_count = num_seq_blocks * (BLOCK_M // BLOCK_N)
-        grid = (num_sequences, num_folded_heads, num_seq_blocks)
         dkdv_lock = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.bool, device=q.device)
-        _backward[grid](
+        _compileable_backward(
+            do, dr, q, k, v, cu_seqlens, neg_log_acc,
+            logit_scale, BLOCK_M, BLOCK_N,
+            batch_size, num_heads, token_size, dim_size,
+            dq, dk, dv, dkdv_lock, dkdv_count,
+            num_sequences, num_folded_heads, num_seq_blocks
+        )
+        return dq, dk, dv
+
+@torch.library.custom_op("stickbreaking_attention::varlen_bwd", 
+                         mutates_args={"dq", "dk", "dv", "dkdv_lock", "dkdv_count"})
+def _compileable_backward(
+        do: torch.Tensor, dr: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+        cu_seqlens: torch.Tensor, neg_log_acc: torch.Tensor,
+        logit_scale: float,
+        BLOCK_M: int, BLOCK_N: int,
+        batch_size: int, num_heads: int, token_size: int, dim_size: int,
+        dq: torch.Tensor, dk: torch.Tensor, dv: torch.Tensor,
+        dkdv_lock: torch.Tensor, dkdv_count: torch.Tensor,
+        num_sequences: int, num_folded_heads: int, num_seq_blocks: int
+    ) -> None:
+    BLOCK_D = triton.next_power_of_2(dim_size)
+    _backward[num_sequences, num_folded_heads, num_seq_blocks](
             # DO_ptr, stride_doh, stride_dom, stride_dod,
             do, do.stride(0), do.stride(1), do.stride(2),
             # DR_ptr, stride_drh, stride_drm,
@@ -346,5 +366,4 @@ def varlen_bwd(do, dr, q, k, v, cu_seqlens, max_seqlens, neg_log_acc, logit_scal
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2
         )
-        return dq, dk, dv
 

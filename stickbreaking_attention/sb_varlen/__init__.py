@@ -61,7 +61,7 @@ class StickBreakingAttention(torch.autograd.Function):
         )
         return dq, dk, dv, None, None, None
 
-
+@torch.compile()
 def sb_attn_varlen(q, k, v, cu_seqlens, max_seqlens, inv_temp=None, zero_start=True):
     if zero_start:
         assert cu_seqlens[0] == 0
