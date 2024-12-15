@@ -286,19 +286,21 @@ def _backward_one_row(
         tl.store(DQ_blk_ptrs, dq, mask=M_mask[:, None] & D_mask[None, :])
 
 
-def varlen_bwd(do, dr, q, k, v, cu_seqlens, max_seqlens, neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32):
+def varlen_bwd(
+        do: torch.Tensor, dr: torch.Tensor,
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+        cu_seqlens: torch.Tensor, max_seqlens: int, neg_log_acc: torch.Tensor,
+        logit_scale, BLOCK_M=64, BLOCK_N=32):
     with torch.cuda.device(q.device):
         batch_size = cu_seqlens.size(0)
-        num_heads = q.size(0)
-        token_size = q.size(1)
-        dim_size = q.size(-1)
+        num_heads, token_size, dim_size = q.size()
         if logit_scale is None:
             logit_scale = 1 / math.sqrt(dim_size)
         N_count = triton.cdiv(token_size, BLOCK_N)
 
-        dq = torch.empty_like(q)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
+        dqdkdv = torch.zeros((token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
+        dqdkdv = dqdkdv.permute(1, 0, 2)
+        dq, dk, dv = dqdkdv.chunk(3, dim=-1)
 
         num_sequences = batch_size
         num_folded_heads = num_heads
