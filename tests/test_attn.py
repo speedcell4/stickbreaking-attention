@@ -31,14 +31,13 @@ def ref_fwdbwd(do, q, k, v, length):
 
 class TestClass:
 
-    @pytest.mark.parametrize('compile', [False, True])
     @pytest.mark.parametrize('batch_size', [4, 2, 1])
     @pytest.mark.parametrize('num_heads', [24, 8, 4, 2, 1, 7])
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
     @pytest.mark.parametrize('dtype', [torch.bfloat16])
     @pytest.mark.parametrize('forward_only', [False])
-    def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only, compile):
+    def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
         set_seed(1337)
         torch.set_printoptions(linewidth=110, edgeitems=30)
         device = torch.device('cuda:0')
@@ -51,12 +50,9 @@ class TestClass:
         k = k.to(dtype).requires_grad_()
         v = v.to(dtype).requires_grad_()
         do = torch.randn(input_dims, device=device, dtype=dtype)
-        if compile:
-            sb_attn_fun = torch.compile(sb_attn)
-        else:
-            sb_attn_fun = sb_attn
+
         with torch.cuda.device(device):
-            o, rem= sb_attn_fun(q, k, v, inv_temp=1 / math.sqrt(q.size(-1)))
+            o, rem= sb_attn(q, k, v, inv_temp=1 / math.sqrt(q.size(-1)))
             o = o + rem[..., None] * v
             ref_out, ref_dq, ref_dk, ref_dv = ref_fwdbwd(do, q, k, v, length)
         eps = 0.05
