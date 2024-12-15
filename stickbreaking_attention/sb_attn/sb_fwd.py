@@ -96,13 +96,26 @@ def _fwd(q, k, v, logit_scale,
         W = torch.full((batch_size, num_heads, token_size, token_size), 0., dtype=torch.float32, device=q.device)
     else:
         W = torch.empty((1, 1, 1, 1), device=q.device)
+    _compileable_fwd(q, k, v, logit_scale, no_grad, return_attention, BLOCK_M, BLOCK_N,
+                     batch_size, num_heads, token_size, dim_size, o, rem, neg_log_acc, W)
+    if return_attention:
+        return o, rem, neg_log_acc, W
+    else:
+        return o, rem, neg_log_acc
+
+
+@torch.library.custom_op("stickbreaking_attention::attn_fwd",
+                         mutates_args={"o", "rem", "neg_log_acc", "W"})
+def _compileable_fwd(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    logit_scale: float, no_grad: bool, return_attention: bool,
+    BLOCK_M: int, BLOCK_N: int, batch_size: int, num_heads: int, token_size: int, dim_size: int,
+    o: torch.Tensor, rem: torch.Tensor, neg_log_acc: torch.Tensor, W: torch.Tensor
+) -> None:
     num_folded_heads = num_heads
-    torch._check_is_size(token_size)
-    torch._check_is_size(BLOCK_M)
     num_seq_blocks = triton.cdiv(token_size, BLOCK_M)
     BLOCK_D = triton.next_power_of_2(dim_size)
     grid = (batch_size, num_folded_heads, num_seq_blocks)
-
     _forward[grid](
         q, q.stride(0), q.stride(1), q.stride(2), q.stride(3),
         k, k.stride(0), k.stride(1), k.stride(2), k.stride(3),
@@ -127,9 +140,5 @@ def _fwd(q, k, v, logit_scale,
         inv_log2=inv_log2,
         return_attention=return_attention,
         acc_dtype=tl.float32,
-        is_compiling=torch.compiler.is_compiling()
+        is_compiling=False
     )
-    if return_attention:
-        return o, rem, neg_log_acc, W
-    else:
-        return o, rem, neg_log_acc

@@ -101,7 +101,6 @@ def _backward(
 def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, strides=None):
     with torch.cuda.device(q.device):
         batch_size, num_heads, token_size, dim_size = q.size()
-        BLOCK_D = triton.next_power_of_2(dim_size)
         M_count = triton.cdiv(token_size, BLOCK_M)
         N_count = triton.cdiv(token_size, BLOCK_N)
         dq = torch.empty_like(q)
@@ -111,33 +110,36 @@ def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, str
         N_count = M_count * (BLOCK_M // BLOCK_N)
         dkdv_lock = torch.zeros((batch_size, num_heads, N_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((batch_size, num_heads, N_count), dtype=torch.bool, device=q.device)
-        if strides is not None:
-            q_stride, k_stride, v_stride, o_stride, rem_stride, neg_log_acc_stride = strides
-        else:
-            q_stride = q.stride()
-            k_stride = k.stride()
-            v_stride = v.stride()
-            o_stride = do.stride()
-            rem_stride = dr.stride()
-            neg_log_acc_stride = neg_log_acc.stride()
+        _compileable_backward(
+            do, dr, q, k, v, neg_log_acc, logit_scale, BLOCK_M, BLOCK_N,
+            batch_size, num_heads, token_size, dim_size, M_count, N_count,
+            dq, dk, dv, dkdv_lock, dkdv_count
+        )
+        return dq, dk, dv
 
-        do = do.contiguous()
-        dr = dr.contiguous()
-        do_stride = (do.size(-3) * do.size(-2) * do.size(-1),
-                     do.size(-2) * do.size(-1),
-                     do.size(-1), 1)
-        dr_stride = (dr.size(-2) * dr.size(-1), dr.size(-1), 1)
 
-        _backward[batch_size, num_heads, M_count](
-            do, do_stride[0], do_stride[1], do_stride[2], do_stride[3],
-            dr, dr_stride[0], dr_stride[1], dr_stride[2],
-            neg_log_acc, neg_log_acc_stride[0], neg_log_acc_stride[1], neg_log_acc_stride[2],
-            q, q_stride[0], q_stride[1], q_stride[2], q_stride[3],
-            k, k_stride[0], k_stride[1], k_stride[2], k_stride[3],
-            v, v_stride[0], v_stride[1], v_stride[2], v_stride[3],
-            dq, q_stride[0], q_stride[1], q_stride[2], q_stride[3],
-            dk, k_stride[0], k_stride[1], k_stride[2], k_stride[3],
-            dv, v_stride[0], v_stride[1], v_stride[2], v_stride[3],
+@torch.library.custom_op("stickbreaking_attention::attn_bwd",
+                         mutates_args={"dq", "dk", "dv", "dkdv_lock", "dkdv_count"})
+def _compileable_backward(
+    do: torch.Tensor, dr: torch.Tensor,
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, neg_log_acc: torch.Tensor,
+    logit_scale: float,
+    BLOCK_M: int, BLOCK_N: int, batch_size: int, num_heads: int, token_size: int,
+    dim_size: int, M_count: int, N_count: int,
+    dq: torch.Tensor, dk: torch.Tensor, dv: torch.Tensor,
+    dkdv_lock: torch.Tensor, dkdv_count: torch.Tensor
+) -> None:
+    BLOCK_D = triton.next_power_of_2(dim_size)
+    _backward[batch_size, num_heads, M_count](
+            do, do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+            dr, dr.stride(0), dr.stride(1), dr.stride(2),
+            neg_log_acc, neg_log_acc.stride(0), neg_log_acc.stride(1), neg_log_acc.stride(2),
+            q, q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+            k, k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            v, v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            dq, dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
+            dk, dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+            dv, dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
             dkdv_lock, dkdv_count, num_heads * N_count, N_count,
             logit_scale=logit_scale,
             batch_size=batch_size,
@@ -153,7 +155,6 @@ def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, str
             ALLOW_TF32=ALLOW_TF32,
             inv_log2=inv_log2,
             acc_dtype=tl.float32,
-            is_compiling=torch.compiler.is_compiling()
+            is_compiling=False
         )
-        return dq, dk, dv
 

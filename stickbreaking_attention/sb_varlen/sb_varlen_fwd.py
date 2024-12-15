@@ -306,8 +306,7 @@ def varlen_fwd(
         return o, rem, neg_log_acc
 
 
-@torch.library.custom_op("stickbreaking_attention::varlen_fwd",
-                         mutates_args={"o", "rem", "neg_log_acc", "W"})
+@torch.library.custom_op("stickbreaking_attention::varlen_fwd", mutates_args={"o", "rem", "neg_log_acc", "W"})
 def _compileable_forward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, max_seqlens: int,
