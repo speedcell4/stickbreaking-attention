@@ -89,7 +89,7 @@ def _backward(
     num_N_per_M = BLOCK_M // BLOCK_N
     # grid = (num_sequences, num_heads, num_seq_blocks)
     seq_id = tl.program_id(0)
-    head_id = tl.program_id(1)
+    fhead_id = tl.program_id(1)
     seq_alloc_prog_id = tl.program_id(2)
     num_seq_alloc_progs = tl.num_programs(2)
 
@@ -110,7 +110,9 @@ def _backward(
     num_seq_blocks = tl.cdiv(seq_length, BLOCK_M)
 
     seq_a_block_id = num_seq_blocks - seq_alloc_prog_id - 1
+    seq_b_block_id = seq_alloc_prog_id - (num_seq_alloc_progs - num_seq_blocks)
     if seq_a_block_id >= 0:
+        head_id = fhead_id * 2
         DO_head_seq_ptr = DO_ptr + stride_doh * head_id + stride_dom * seq_start_offset
         DR_head_seq_ptr = DR_ptr + stride_drh * head_id + stride_drm * seq_start_offset
         A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
@@ -147,6 +149,46 @@ def _backward(
             BLOCK_N,
             acc_dtype,
         )
+    if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
+        head_id = fhead_id * 2 + 1
+        DO_head_seq_ptr = DO_ptr + stride_doh * head_id + stride_dom * seq_start_offset
+        DR_head_seq_ptr = DR_ptr + stride_drh * head_id + stride_drm * seq_start_offset
+        A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
+        Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
+        K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
+        V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
+        DQ_head_seq_ptr = DQ_ptr + stride_dqh * head_id + stride_dqm * seq_start_offset
+        DK_head_seq_ptr = DK_ptr + stride_dkh * head_id + stride_dkn * seq_start_offset
+        DV_head_seq_ptr = DV_ptr + stride_dvh * head_id + stride_dvn * seq_start_offset
+        KV_Lock_head_seq_ptr =  KV_Lock_ptr + stride_kvs * seq_id + stride_kvh * head_id
+        KV_Count_head_seq_ptr = KV_Count_ptr + stride_kvs * seq_id + stride_kvh * head_id
+        _backward_one_row(
+            seq_b_block_id, seq_length,
+            qk_scale,
+            M_range,
+            N_range,
+            D_range, D_mask, cm,
+            DO_head_seq_ptr, stride_dom, stride_dod,
+            DR_head_seq_ptr, stride_drm,
+            A_head_seq_ptr, stride_am,
+            Q_head_seq_ptr, stride_qm, stride_qd,
+            K_head_seq_ptr, stride_kn, stride_kd,
+            V_head_seq_ptr, stride_vn, stride_vd,
+            DQ_head_seq_ptr, stride_dqm, stride_dqd,
+            DK_head_seq_ptr, stride_dkn, stride_dkd,
+            DV_head_seq_ptr, stride_dvn, stride_dvd,
+            KV_Lock_head_seq_ptr, KV_Count_head_seq_ptr,
+            logit_scale,
+            BLOCK_D,
+            NO_D_MASK,
+            NO_M_MASK,
+            ALLOW_TF32,
+            BLOCK_M,
+            BLOCK_N,
+            acc_dtype,
+        )
+
+
 
 @triton.jit
 def _backward_one_row(
@@ -298,13 +340,16 @@ def varlen_bwd(
             logit_scale = 1 / math.sqrt(dim_size)
         N_count = triton.cdiv(token_size, BLOCK_N)
 
-        dqdkdv = torch.zeros((token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
-        dqdkdv = dqdkdv.permute(1, 0, 2)
-        dq, dk, dv = dqdkdv.chunk(3, dim=-1)
+        # dqdkdv = torch.zeros((token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
+        # dqdkdv = dqdkdv.permute(1, 0, 2)
+        # dq, dk, dv = dqdkdv.chunk(3, dim=-1)
+        dq = torch.zeros_like(q)
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
 
         num_sequences = batch_size
-        num_folded_heads = num_heads
-        num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M)
+        num_folded_heads = triton.cdiv(num_heads, 2)
+        num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
         N_count = num_seq_blocks * (BLOCK_M // BLOCK_N)
         dkdv_lock = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.int32, device=q.device)
         dkdv_count = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.bool, device=q.device)

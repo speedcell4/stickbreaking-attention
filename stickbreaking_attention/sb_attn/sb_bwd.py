@@ -98,8 +98,7 @@ def _backward(
         is_compiling=is_compiling
     )
 
-def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, strides=None):
-    # print("Begin backward.")
+def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32):
     batch_size, num_heads, token_size, dim_size = q.size()
     M_count = triton.cdiv(token_size, BLOCK_M)
     N_count = triton.cdiv(token_size, BLOCK_N)

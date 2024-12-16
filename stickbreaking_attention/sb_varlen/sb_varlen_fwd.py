@@ -90,7 +90,8 @@ def _forward_one_row(
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
-    is_compiling: tl.constexpr = False
+    is_compiling: tl.constexpr = False,
+    use_cumsum: tl.constexpr = False
 ):
     # Loading thread information
     block_start_offset = BLOCK_M * seq_block_id
@@ -143,7 +144,8 @@ def _forward_one_row(
             cm, on_band,
             ALLOW_TF32,
             backward=False,
-            is_compiling=is_compiling
+            is_compiling=is_compiling,
+            use_cumsum=use_cumsum
         )
         # Store intermediate values
         acc = tl.dot(p.to(v.dtype), v, acc, allow_tf32=ALLOW_TF32)
@@ -198,6 +200,7 @@ def _forward(
     no_grad: tl.constexpr = False,
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
+    use_cumsum: tl.constexpr=False
 ): 
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     seq_id = tl.program_id(0)
@@ -210,7 +213,10 @@ def _forward(
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+    if not use_cumsum:
+        cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+    else:
+        cm = None
 
     if seq_id == 0:
         seq_start_offset = 0
@@ -250,6 +256,7 @@ def _forward(
             BLOCK_M, BLOCK_N,
             no_grad, acc_dtype,
             return_attention,
+            use_cumsum=use_cumsum
         )
     if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
         # Reverse head block
@@ -279,6 +286,7 @@ def _forward(
             BLOCK_M, BLOCK_N,
             no_grad, acc_dtype,
             return_attention,
+            use_cumsum=use_cumsum
         )
 
 # @torch.compile(fullgraph=True)
@@ -306,7 +314,8 @@ def varlen_fwd(
         return o, rem, neg_log_acc
 
 
-@torch.library.custom_op("stickbreaking_attention::varlen_fwd", mutates_args={"o", "rem", "neg_log_acc", "W"})
+@torch.library.custom_op("stickbreaking_attention::varlen_fwd",
+                         mutates_args={"o", "rem", "neg_log_acc", "W"})
 def _compileable_forward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, max_seqlens: int,
@@ -353,5 +362,6 @@ def _compileable_forward(
         ALLOW_TF32=ALLOW_TF32,
         inv_log2=inv_log2,
         return_attention=return_attention,
-        acc_dtype=tl.float32
+        acc_dtype=tl.float32,
+        use_cumsum=False
     )

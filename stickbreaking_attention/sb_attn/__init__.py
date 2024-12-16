@@ -26,8 +26,6 @@ class StickBreakingAttention(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v, neg_log_acc)
         ctx.logit_scale = logit_scale
-        ctx.strides = (q.stride(), k.stride(), v.stride(), o.stride(),
-                       rem.stride(), neg_log_acc.stride())
         return o, rem
 
     @staticmethod
@@ -39,7 +37,6 @@ class StickBreakingAttention(torch.autograd.Function):
         dq, dk, dv = _bwd(
             do, drem, q, k, v,  neg_log_acc, logit_scale,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-            strides=ctx.strides
         )
         return dq, dk, dv, None
 
