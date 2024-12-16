@@ -99,25 +99,28 @@ def _backward(
     )
 
 def _bwd(do, dr, q, k, v,  neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32, strides=None):
-    with torch.cuda.device(q.device):
-        batch_size, num_heads, token_size, dim_size = q.size()
-        M_count = triton.cdiv(token_size, BLOCK_M)
-        N_count = triton.cdiv(token_size, BLOCK_N)
+    # print("Begin backward.")
+    batch_size, num_heads, token_size, dim_size = q.size()
+    M_count = triton.cdiv(token_size, BLOCK_M)
+    N_count = triton.cdiv(token_size, BLOCK_N)
 
-        dqdkdv = torch.zeros((batch_size, token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
-        dqdkdv = dqdkdv.permute(0, 2, 1, 3)
-        dq, dk, dv = dqdkdv.chunk(3, dim=-1)
+    # dqdkdv = torch.zeros((batch_size, token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
+    # dqdkdv = dqdkdv.permute(0, 2, 1, 3)
+    # dq, dk, dv = dqdkdv.chunk(3, dim=-1)
+    dq = torch.zeros_like(q)
+    dk = torch.zeros_like(k)
+    dv = torch.zeros_like(v)
 
-        M_count = triton.cdiv(token_size, BLOCK_M)
-        N_count = M_count * (BLOCK_M // BLOCK_N)
-        dkdv_lock = torch.zeros((batch_size, num_heads, N_count), dtype=torch.int32, device=q.device)
-        dkdv_count = torch.zeros((batch_size, num_heads, N_count), dtype=torch.bool, device=q.device)
-        _compileable_backward(
-            do, dr, q, k, v, neg_log_acc, logit_scale, BLOCK_M, BLOCK_N,
-            batch_size, num_heads, token_size, dim_size, M_count, N_count,
-            dq, dk, dv, dkdv_lock, dkdv_count
-        )
-        return dq, dk, dv
+    M_count = triton.cdiv(token_size, BLOCK_M)
+    N_count = M_count * (BLOCK_M // BLOCK_N)
+    dkdv_lock = torch.zeros((batch_size, num_heads, N_count), dtype=torch.int32, device=q.device)
+    dkdv_count = torch.zeros((batch_size, num_heads, N_count), dtype=torch.bool, device=q.device)
+    _compileable_backward(
+        do, dr, q, k, v, neg_log_acc, logit_scale, BLOCK_M, BLOCK_N,
+        batch_size, num_heads, token_size, dim_size, M_count, N_count,
+        dq, dk, dv, dkdv_lock, dkdv_count
+    )
+    return dq, dk, dv
 
 
 @torch.library.custom_op("stickbreaking_attention::attn_bwd",
