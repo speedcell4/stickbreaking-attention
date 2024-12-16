@@ -38,13 +38,12 @@ def ref_fwdbwd(do, q, k, v, lengths):
     return o
 
 
-sb_attn_varlen_fn = torch.compile(sb_attn_varlen, fullgraph=True)
 def tri_fwdbwd(do, q, k, v, lengths):
     q = q.permute(1, 0, 2)
     k = k.permute(1, 0, 2)
     v = v.permute(1, 0, 2)
     cu_seqlens = torch.cumsum(lengths, dim=-1)
-    o, rem = sb_attn_varlen_fn(q, k, v,
+    o, rem = sb_attn_varlen(q, k, v,
                             cu_seqlens=cu_seqlens,
                             max_seqlens=max(lengths).item(),
                             inv_temp=1 / math.sqrt(q.size(-1)),
