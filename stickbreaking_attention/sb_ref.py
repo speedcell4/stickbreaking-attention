@@ -1,6 +1,8 @@
 import math
+
 import torch
 from torch.nn import functional as F
+
 
 # for reference
 def stickbreaking(q, k, v, mask, cum_weight):
@@ -16,7 +18,7 @@ def stickbreaking(q, k, v, mask, cum_weight):
 
     log_beta = F.logsigmoid(-logits).masked_fill(mask, 0).to(original_dtype)
 
-    re_cum_log_beta = torch.einsum('bhij,jk->bhik', log_beta, cum_weight.to(log_beta))
+    re_cum_log_beta = torch.einsum("bhij,jk->bhik", log_beta, cum_weight.to(log_beta))
     log_att = log_z + re_cum_log_beta
     att = log_att.exp()
     return att @ v, 1 - att.sum(dim=-1)
