@@ -455,51 +455,50 @@ def varlen_bwd(
     BLOCK_M=64,
     BLOCK_N=32,
 ):
-    with torch.cuda.device(q.device):
-        batch_size = cu_seqlens.size(0)
-        num_heads, token_size, dim_size = q.size()
-        if logit_scale is None:
-            logit_scale = 1 / math.sqrt(dim_size)
-        N_count = triton.cdiv(token_size, BLOCK_N)
+    batch_size = cu_seqlens.size(0)
+    num_heads, token_size, dim_size = q.size()
+    if logit_scale is None:
+        logit_scale = 1 / math.sqrt(dim_size)
+    N_count = triton.cdiv(token_size, BLOCK_N)
 
-        # dqdkdv = torch.zeros((token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
-        # dqdkdv = dqdkdv.permute(1, 0, 2)
-        # dq, dk, dv = dqdkdv.chunk(3, dim=-1)
-        dq = torch.zeros_like(q)
-        dk = torch.zeros_like(k)
-        dv = torch.zeros_like(v)
+    # dqdkdv = torch.zeros((token_size, num_heads, 3 * dim_size), device=do.device, dtype=do.dtype)
+    # dqdkdv = dqdkdv.permute(1, 0, 2)
+    # dq, dk, dv = dqdkdv.chunk(3, dim=-1)
+    dq = torch.zeros_like(q)
+    dk = torch.zeros_like(k)
+    dv = torch.zeros_like(v)
 
-        num_sequences = batch_size
-        num_folded_heads = triton.cdiv(num_heads, 2)
-        num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
-        N_count = num_seq_blocks * (BLOCK_M // BLOCK_N)
-        dkdv_lock = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.int32, device=q.device)
-        dkdv_count = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.bool, device=q.device)
-        _compileable_backward(
-            do,
-            dr,
-            q,
-            k,
-            v,
-            cu_seqlens,
-            neg_log_acc,
-            logit_scale,
-            BLOCK_M,
-            BLOCK_N,
-            batch_size,
-            num_heads,
-            token_size,
-            dim_size,
-            dq,
-            dk,
-            dv,
-            dkdv_lock,
-            dkdv_count,
-            num_sequences,
-            num_folded_heads,
-            num_seq_blocks,
-        )
-        return dq, dk, dv
+    num_sequences = batch_size
+    num_folded_heads = triton.cdiv(num_heads, 2)
+    num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
+    N_count = num_seq_blocks * (BLOCK_M // BLOCK_N)
+    dkdv_lock = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.int32, device=q.device)
+    dkdv_count = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.bool, device=q.device)
+    _compileable_backward(
+        do,
+        dr,
+        q,
+        k,
+        v,
+        cu_seqlens,
+        neg_log_acc,
+        logit_scale,
+        BLOCK_M,
+        BLOCK_N,
+        batch_size,
+        num_heads,
+        token_size,
+        dim_size,
+        dq,
+        dk,
+        dv,
+        dkdv_lock,
+        dkdv_count,
+        num_sequences,
+        num_folded_heads,
+        num_seq_blocks,
+    )
+    return dq, dk, dv
 
 
 @torch.library.custom_op(
