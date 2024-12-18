@@ -17,12 +17,13 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
     if NO_D_MASK:
         if NO_N_MASK:
             if count == 0:
-                tl.store(A_ptrs, a, eviction_policy="evict_last")
-                tl.store(B_ptrs, b, eviction_policy="evict_last")
                 tl.store(Count_ptr, True, eviction_policy="evict_last")
             else:
-                tl.store(A_ptrs, a + tl.load(A_ptrs, eviction_policy="evict_last"), eviction_policy="evict_last")
-                tl.store(B_ptrs, b + tl.load(B_ptrs, eviction_policy="evict_last"), eviction_policy="evict_last")
+                a += tl.load(A_ptrs, eviction_policy="evict_last")
+                b += tl.load(B_ptrs, eviction_policy="evict_last")
+            tl.store(A_ptrs, a, eviction_policy="evict_last")
+            tl.store(B_ptrs, b, eviction_policy="evict_last")
+
         else:
             if count == 0:
                 tl.store(A_ptrs, a, mask=N_mask[:, None], eviction_policy="evict_last")
