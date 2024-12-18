@@ -16,7 +16,7 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
     count = tl.load(Count_ptr, eviction_policy="evict_last")
     if NO_D_MASK:
         if NO_N_MASK:
-            if count:
+            if count == 0:
                 tl.store(A_ptrs, a, eviction_policy="evict_last")
                 tl.store(B_ptrs, b, eviction_policy="evict_last")
                 tl.store(Count_ptr, True, eviction_policy="evict_last")
@@ -24,7 +24,7 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
                 tl.store(A_ptrs, a + tl.load(A_ptrs, eviction_policy="evict_last"), eviction_policy="evict_last")
                 tl.store(B_ptrs, b + tl.load(B_ptrs, eviction_policy="evict_last"), eviction_policy="evict_last")
         else:
-            if count:
+            if count == 0:
                 tl.store(A_ptrs, a, mask=N_mask[:, None], eviction_policy="evict_last")
                 tl.store(B_ptrs, b, mask=N_mask[:, None], eviction_policy="evict_last")
                 tl.store(Count_ptr, True, eviction_policy="evict_last")
@@ -44,7 +44,7 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
 
     else:
         mask = N_mask[:, None] & D_mask[None, :]
-        if count:
+        if count == 0:
             tl.store(A_ptrs, a, mask=mask, eviction_policy="evict_last")
             tl.store(B_ptrs, b, mask=mask, eviction_policy="evict_last")
             tl.store(Count_ptr, True, eviction_policy="evict_last")
@@ -589,8 +589,8 @@ def _compileable_backward(
         BLOCK_D=BLOCK_D,
         BLOCK_CSL=triton.next_power_of_2(batch_size),
         NO_D_MASK=BLOCK_D == dim_size,
-        NO_M_MASK=(token_size % BLOCK_M) == 0,
-        NO_N_MASK=(token_size % BLOCK_N) == 0,
+        NO_M_MASK=False,
+        NO_N_MASK=False,
         ALLOW_TF32=ALLOW_TF32,
         inv_log2=inv_log2,
     )
