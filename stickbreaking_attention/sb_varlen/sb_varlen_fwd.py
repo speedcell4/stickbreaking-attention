@@ -251,17 +251,6 @@ def _forward(
     fhead_id = tl.program_id(1)
     seq_alloc_prog_id = tl.program_id(2)
     num_seq_alloc_progs = tl.num_programs(2)
-    # Universal stuff
-    qk_scale = inv_log2 * logit_scale
-    M_range = tl.arange(0, BLOCK_M)
-    N_range = tl.arange(0, BLOCK_N)
-    D_range = tl.arange(0, BLOCK_D)
-    D_mask = D_range < head_size
-    if not use_cumsum:
-        cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
-    else:
-        cm = None
-
     if seq_id == 0:
         seq_start_offset = 0
     else:
@@ -272,106 +261,120 @@ def _forward(
 
     seq_a_block_id = num_seq_blocks - seq_alloc_prog_id - 1
     seq_b_block_id = seq_alloc_prog_id - (num_seq_alloc_progs - num_seq_blocks)
-    if seq_a_block_id >= 0:
-        # First head block
-        head_id = fhead_id * 2
-        Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
-        K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
-        V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
-        O_head_seq_ptr = O_ptr + stride_oh * head_id + stride_om * seq_start_offset
-        R_head_seq_ptr = R_ptr + stride_rh * head_id + stride_rm * seq_start_offset
-        A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
-        W_head_seq_ptr = W_ptr + stride_wh * head_id + stride_am * seq_start_offset
-        _forward_one_row(
-            seq_a_block_id,
-            seq_length,
-            qk_scale,
-            M_range,
-            N_range,
-            D_range,
-            D_mask,
-            cm,
-            Q_head_seq_ptr,
-            stride_qm,
-            stride_qd,
-            K_head_seq_ptr,
-            stride_kn,
-            stride_kd,
-            V_head_seq_ptr,
-            stride_vn,
-            stride_vd,
-            O_head_seq_ptr,
-            stride_om,
-            stride_od,
-            R_head_seq_ptr,
-            stride_rm,
-            A_head_seq_ptr,
-            stride_am,
-            W_head_seq_ptr,
-            stride_wm,
-            stride_wn,
-            BLOCK_D,
-            NO_D_MASK,
-            NO_M_MASK,
-            NO_N_MASK,
-            ALLOW_TF32,
-            BLOCK_M,
-            BLOCK_N,
-            no_grad,
-            acc_dtype,
-            return_attention,
-            use_cumsum=use_cumsum,
-        )
-    if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
-        # Reverse head block
-        head_id = fhead_id * 2 + 1
-        Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
-        K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
-        V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
-        O_head_seq_ptr = O_ptr + stride_oh * head_id + stride_om * seq_start_offset
-        R_head_seq_ptr = R_ptr + stride_rh * head_id + stride_rm * seq_start_offset
-        A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
-        W_head_seq_ptr = W_ptr + stride_wh * head_id + stride_am * seq_start_offset
-        _forward_one_row(
-            seq_b_block_id,
-            seq_length,
-            qk_scale,
-            M_range,
-            N_range,
-            D_range,
-            D_mask,
-            cm,
-            Q_head_seq_ptr,
-            stride_qm,
-            stride_qd,
-            K_head_seq_ptr,
-            stride_kn,
-            stride_kd,
-            V_head_seq_ptr,
-            stride_vn,
-            stride_vd,
-            O_head_seq_ptr,
-            stride_om,
-            stride_od,
-            R_head_seq_ptr,
-            stride_rm,
-            A_head_seq_ptr,
-            stride_am,
-            W_head_seq_ptr,
-            stride_wm,
-            stride_wn,
-            BLOCK_D,
-            NO_D_MASK,
-            NO_M_MASK,
-            NO_N_MASK,
-            ALLOW_TF32,
-            BLOCK_M,
-            BLOCK_N,
-            no_grad,
-            acc_dtype,
-            return_attention,
-            use_cumsum=use_cumsum,
-        )
+
+    if seq_a_block_id >= 0 or seq_b_block_id >= 0:
+        # Universal stuff
+        qk_scale = inv_log2 * logit_scale
+        M_range = tl.arange(0, BLOCK_M)
+        N_range = tl.arange(0, BLOCK_N)
+        D_range = tl.arange(0, BLOCK_D)
+        D_mask = D_range < head_size
+        if not use_cumsum:
+            cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+        else:
+            cm = None
+
+
+        if seq_a_block_id >= 0:
+            # First head block
+            head_id = fhead_id * 2
+            Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
+            K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
+            V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
+            O_head_seq_ptr = O_ptr + stride_oh * head_id + stride_om * seq_start_offset
+            R_head_seq_ptr = R_ptr + stride_rh * head_id + stride_rm * seq_start_offset
+            A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
+            W_head_seq_ptr = W_ptr + stride_wh * head_id + stride_am * seq_start_offset
+            _forward_one_row(
+                seq_a_block_id,
+                seq_length,
+                qk_scale,
+                M_range,
+                N_range,
+                D_range,
+                D_mask,
+                cm,
+                Q_head_seq_ptr,
+                stride_qm,
+                stride_qd,
+                K_head_seq_ptr,
+                stride_kn,
+                stride_kd,
+                V_head_seq_ptr,
+                stride_vn,
+                stride_vd,
+                O_head_seq_ptr,
+                stride_om,
+                stride_od,
+                R_head_seq_ptr,
+                stride_rm,
+                A_head_seq_ptr,
+                stride_am,
+                W_head_seq_ptr,
+                stride_wm,
+                stride_wn,
+                BLOCK_D,
+                NO_D_MASK,
+                NO_M_MASK,
+                NO_N_MASK,
+                ALLOW_TF32,
+                BLOCK_M,
+                BLOCK_N,
+                no_grad,
+                acc_dtype,
+                return_attention,
+                use_cumsum=use_cumsum,
+            )
+        if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
+            # Reverse head block
+            head_id = fhead_id * 2 + 1
+            Q_head_seq_ptr = Q_ptr + stride_qh * head_id + stride_qm * seq_start_offset
+            K_head_seq_ptr = K_ptr + stride_kh * head_id + stride_kn * seq_start_offset
+            V_head_seq_ptr = V_ptr + stride_vh * head_id + stride_vn * seq_start_offset
+            O_head_seq_ptr = O_ptr + stride_oh * head_id + stride_om * seq_start_offset
+            R_head_seq_ptr = R_ptr + stride_rh * head_id + stride_rm * seq_start_offset
+            A_head_seq_ptr = A_ptr + stride_ah * head_id + stride_am * seq_start_offset
+            W_head_seq_ptr = W_ptr + stride_wh * head_id + stride_am * seq_start_offset
+            _forward_one_row(
+                seq_b_block_id,
+                seq_length,
+                qk_scale,
+                M_range,
+                N_range,
+                D_range,
+                D_mask,
+                cm,
+                Q_head_seq_ptr,
+                stride_qm,
+                stride_qd,
+                K_head_seq_ptr,
+                stride_kn,
+                stride_kd,
+                V_head_seq_ptr,
+                stride_vn,
+                stride_vd,
+                O_head_seq_ptr,
+                stride_om,
+                stride_od,
+                R_head_seq_ptr,
+                stride_rm,
+                A_head_seq_ptr,
+                stride_am,
+                W_head_seq_ptr,
+                stride_wm,
+                stride_wn,
+                BLOCK_D,
+                NO_D_MASK,
+                NO_M_MASK,
+                NO_N_MASK,
+                ALLOW_TF32,
+                BLOCK_M,
+                BLOCK_N,
+                no_grad,
+                acc_dtype,
+                return_attention,
+                use_cumsum=use_cumsum,
+            )
 
 
 def varlen_fwd(
