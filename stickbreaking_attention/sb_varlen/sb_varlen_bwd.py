@@ -26,42 +26,23 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
 
         else:
             if count == 0:
-                tl.store(A_ptrs, a, mask=N_mask[:, None], eviction_policy="evict_last")
-                tl.store(B_ptrs, b, mask=N_mask[:, None], eviction_policy="evict_last")
                 tl.store(Count_ptr, True, eviction_policy="evict_last")
             else:
-                tl.store(
-                    A_ptrs,
-                    a + tl.load(A_ptrs, mask=N_mask[:, None], eviction_policy="evict_last"),
-                    mask=N_mask[:, None],
-                    eviction_policy="evict_last",
-                )
-                tl.store(
-                    B_ptrs,
-                    b + tl.load(B_ptrs, mask=N_mask[:, None], eviction_policy="evict_last"),
-                    mask=N_mask[:, None],
-                    eviction_policy="evict_last",
-                )
+                a += tl.load(A_ptrs, mask=N_mask[:, None], eviction_policy="evict_last")
+                b += tl.load(B_ptrs, mask=N_mask[:, None], eviction_policy="evict_last")
+            tl.store(A_ptrs, a, mask=N_mask[:, None], eviction_policy="evict_last")
+            tl.store(B_ptrs, b, mask=N_mask[:, None], eviction_policy="evict_last")
 
     else:
         mask = N_mask[:, None] & D_mask[None, :]
         if count == 0:
-            tl.store(A_ptrs, a, mask=mask, eviction_policy="evict_last")
-            tl.store(B_ptrs, b, mask=mask, eviction_policy="evict_last")
             tl.store(Count_ptr, True, eviction_policy="evict_last")
         else:
-            tl.store(
-                A_ptrs,
-                a + tl.load(A_ptrs, mask=mask, eviction_policy="evict_last"),
-                mask=mask,
-                eviction_policy="evict_last",
-            )
-            tl.store(
-                B_ptrs,
-                b + tl.load(B_ptrs, mask=mask, eviction_policy="evict_last"),
-                mask=mask,
-                eviction_policy="evict_last",
-            )
+            a += tl.load(A_ptrs, mask=mask, eviction_policy="evict_last")
+            b += tl.load(B_ptrs, mask=mask, eviction_policy="evict_last")
+        tl.store(A_ptrs, a, mask=mask, eviction_policy="evict_last")
+        tl.store(B_ptrs, b, mask=mask, eviction_policy="evict_last")
+
     tl.atomic_xchg(Lock_ptr, 0)
 
 
