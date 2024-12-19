@@ -31,7 +31,7 @@ def compute_block(
     M_blk_idxs,
     N_blk_idxs,
     cm,
-    on_band,
+    on_band: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     backward: tl.constexpr,
     use_cumsum: tl.constexpr = False,
@@ -83,16 +83,16 @@ def _forward_one_row(
     cm,
     Q_head_seq_ptr,
     stride_qm,
-    stride_qd,
+    stride_qd: tl.constexpr,
     K_head_seq_ptr,
     stride_kn,
-    stride_kd,
+    stride_kd: tl.constexpr,
     V_head_seq_ptr,
     stride_vn,
-    stride_vd,
+    stride_vd: tl.constexpr,
     O_head_seq_ptr,
     stride_om,
-    stride_od,
+    stride_od: tl.constexpr,
     R_head_seq_ptr,
     stride_rm,
     A_head_seq_ptr,
@@ -196,27 +196,29 @@ def _forward_one_row(
 
 
 def get_configs():
-    return [triton.Config({}, num_stages=s, num_warps=w) for s in [4] for w in [4]]
-
-
-@triton.autotune(configs=get_configs(), key=["token_size", "head_size"])
+    return [triton.Config({"BLOCK_M": mb, "BLOCK_N": nb}, num_stages=s, num_warps=w)
+            for mb in [64, 128]
+            for nb in [16, 32, 64]
+            for s in [4, 2, 3, 5, 6, 7, 8]
+            for w in [4, 2]]
+@triton.autotune(configs=get_configs(), key=["head_size"])
 @triton.jit
 def _forward(
     Q_ptr,
-    stride_qh,
-    stride_qm: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qm,
     stride_qd: tl.constexpr,
     K_ptr,
-    stride_kh,
-    stride_kn: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_kn,
     stride_kd: tl.constexpr,
     V_ptr,
-    stride_vh,
-    stride_vn: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_vn,
     stride_vd: tl.constexpr,
     O_ptr,
-    stride_oh,
-    stride_om: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_om,
     stride_od: tl.constexpr,
     R_ptr,
     stride_rh,
@@ -443,23 +445,16 @@ def _compileable_forward(
     num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
     BLOCK_D = triton.next_power_of_2(dim_size)
     grid = (num_sequences, num_folded_heads, num_seq_blocks)
+    q_stride = q.stride()
+    k_stride = k.stride()
+    v_stride = v.stride()
+    o_stride = o.stride()
+
     _forward[grid](
-        q,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k,
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v,
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        o,
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
+        q, q_stride[0], q_stride[1], q_stride[2],
+        k, k_stride[0], k_stride[1], k_stride[2],
+        v, v_stride[0], v_stride[1], v_stride[2],
+        o, o_stride[0], o_stride[1], o_stride[2],
         rem,
         rem.stride(0),
         rem.stride(1),
@@ -480,10 +475,10 @@ def _compileable_forward(
         no_grad=no_grad,
         BLOCK_D=BLOCK_D,
         NO_D_MASK=BLOCK_D == dim_size,
-        NO_M_MASK=(token_size % BLOCK_M) == 0,
-        NO_N_MASK=(token_size % BLOCK_N) == 0,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
+        NO_M_MASK=False,
+        NO_N_MASK=False,
+        # BLOCK_M=BLOCK_M,
+        # BLOCK_N=BLOCK_N,
         ALLOW_TF32=ALLOW_TF32,
         inv_log2=inv_log2,
         return_attention=return_attention,
