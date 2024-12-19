@@ -7,24 +7,25 @@ from .softplus import softplus
 
 
 @triton.jit
-def load_kv(KT_blk_ptrs, V_blk_ptrs, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr):
+def load_kv(K_blk_ptrs, V_blk_ptrs, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr):
     if NO_D_MASK:
         if NO_N_MASK:
-            kT = tl.load(KT_blk_ptrs)
+            k = tl.load(K_blk_ptrs)
             v = tl.load(V_blk_ptrs)
         else:
-            kT = tl.load(KT_blk_ptrs, mask=N_mask[None, :])
+            k = tl.load(K_blk_ptrs, mask=N_mask[:, None])
             v = tl.load(V_blk_ptrs, mask=N_mask[:, None])
     else:
-        kT = tl.load(KT_blk_ptrs, mask=N_mask[None, :] & D_mask[:, None])
-        v = tl.load(V_blk_ptrs, mask=N_mask[:, None] & D_mask[None, :])
-    return kT, v
+        mask = N_mask[:, None] & D_mask[None, :]
+        k = tl.load(K_blk_ptrs, mask=mask)
+        v = tl.load(V_blk_ptrs, mask=mask)
+    return k, v
 
 
 @triton.jit
 def compute_block(
     q,
-    kT,
+    k,
     qk_scale,
     neg_log_acc,
     M_blk_idxs,
@@ -37,7 +38,7 @@ def compute_block(
     is_compiling: tl.constexpr = False,
 ):
 
-    qk = tl.dot(q, kT, allow_tf32=ALLOW_TF32) * qk_scale
+    qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
 
     log_om_beta = -softplus(qk, is_compiling=is_compiling)  # log_om_beta (one minus beta) : log(1 - \beta)
 
@@ -122,10 +123,10 @@ def _forward_one_row(
     N_blk_idxs = N_blk_idxs_start + N_range
 
     # Init pointers
-    Q_blk_ptrs = Q_head_seq_ptr + stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :]
-    KT_blk_ptrs = K_head_seq_ptr + stride_kn * N_blk_idxs[None, :] + stride_kd * D_range[:, None]
-    V_blk_ptrs = V_head_seq_ptr + stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :]
-    O_blk_ptrs = O_head_seq_ptr + stride_om * M_blk_idxs[:, None] + stride_od * D_range[None, :]
+    Q_blk_ptrs = Q_head_seq_ptr + (stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :])
+    K_blk_ptrs = K_head_seq_ptr + (stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :])
+    V_blk_ptrs = V_head_seq_ptr + (stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :])
+    O_blk_ptrs = O_head_seq_ptr + (stride_om * M_blk_idxs[:, None] + stride_od * D_range[None, :])
     R_blk_ptrs = R_head_seq_ptr + stride_rm * M_blk_idxs
     A_blk_ptrs = A_head_seq_ptr + stride_am * M_blk_idxs
 
@@ -147,12 +148,12 @@ def _forward_one_row(
     for i in range(iters):
         N_blk_idxs -= BLOCK_N
         N_blk_idxs_start -= BLOCK_N
-        KT_blk_ptrs -= BLOCK_N * stride_kn
+        K_blk_ptrs -= BLOCK_N * stride_kn
         V_blk_ptrs -= BLOCK_N * stride_vn
 
         N_mask = N_blk_idxs < seq_length
-        kT, v = load_kv(
-            KT_blk_ptrs,
+        k, v = load_kv(
+            K_blk_ptrs,
             V_blk_ptrs,
             N_mask=N_mask,
             NO_N_MASK=N_blk_idxs_start + BLOCK_N - 1 < seq_length,
@@ -162,7 +163,7 @@ def _forward_one_row(
         on_band = i < BLOCK_M // BLOCK_N
         p, _, neg_log_acc = compute_block(
             q,
-            kT,
+            k,
             qk_scale,
             neg_log_acc,
             M_blk_idxs,

@@ -314,7 +314,7 @@ def _backward_one_row(
     # Inputs
     DO_blk_ptrs = DO_head_seq_ptr + (stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :])
 
-    KT_blk_ptrs = K_head_seq_ptr + (stride_kn * N_blk_idxs[None, :] + stride_kd * D_range[:, None])
+    K_blk_ptrs = K_head_seq_ptr + (stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :])
     Q_blk_ptrs = Q_head_seq_ptr + (stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :])
     V_blk_ptrs = V_head_seq_ptr + (stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :])
     A_blk_ptrs = A_head_seq_ptr + stride_am * M_blk_idxs
@@ -359,8 +359,8 @@ def _backward_one_row(
         N_mask = N_blk_idxs < seq_length
         NO_N_MASK = (N_blk_idxs_start + BLOCK_N - 1) < seq_length
         # --- Recompute block ---
-        kT, v = load_kv(
-            KT_blk_ptrs,
+        k, v = load_kv(
+            K_blk_ptrs,
             V_blk_ptrs,
             N_mask=N_mask,
             NO_N_MASK=(N_blk_idxs_start + BLOCK_N - 1) < seq_length,
@@ -370,7 +370,7 @@ def _backward_one_row(
         )
         p, log_om_beta, neg_log_acc = compute_block(
             q,
-            kT,
+            k,
             qk_scale,
             neg_log_acc,
             M_blk_idxs,
@@ -395,7 +395,7 @@ def _backward_one_row(
         beta = 1 - tl.exp2(log_om_beta)  # 180 -> 175
         dqk = att_dA - beta * cumul_att_dA
 
-        dq = tl.dot(dqk.to(kT.dtype), tl.trans(kT), acc=dq, allow_tf32=ALLOW_TF32)
+        dq = tl.dot(dqk.to(k.dtype), k, acc=dq, allow_tf32=ALLOW_TF32)
         block_dk = tl.dot(tl.trans(dqk).to(q.dtype), q, allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
         locked_add(
@@ -413,7 +413,7 @@ def _backward_one_row(
         # --- End gradient stuff ---
         N_blk_idxs += BLOCK_N
         N_blk_idxs_start += BLOCK_N
-        KT_blk_ptrs += BLOCK_N * stride_kn
+        K_blk_ptrs += BLOCK_N * stride_kn
         V_blk_ptrs += BLOCK_N * stride_vn
         DK_blk_ptrs += BLOCK_N * stride_dkn
         DV_blk_ptrs += BLOCK_N * stride_dvn
