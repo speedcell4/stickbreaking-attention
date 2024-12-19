@@ -7,6 +7,7 @@ import triton.language as tl
 from . import ALLOW_TF32, inv_log2, log2
 from .sb_varlen_fwd import compute_block, load_kv
 
+from ..utils import custom_op
 
 @triton.jit
 # TODO add two-step lock?
@@ -50,7 +51,10 @@ def get_configs():
     return [triton.Config({}, num_stages=s, num_warps=w) for s in [8] for w in [4]]
 
 
-@triton.autotune(configs=get_configs(), key=["token_size", "head_size"], reset_to_zero=["DK_ptr", "DV_ptr"])
+@triton.autotune(
+    configs=get_configs(), key=["token_size", "head_size"],
+    # reset_to_zero=["DK_ptr", "DV_ptr"]
+)
 @triton.jit
 def _backward(
     DO_ptr,
@@ -486,9 +490,7 @@ def varlen_bwd(
     return dq, dk, dv
 
 
-@torch.library.custom_op(
-    "stickbreaking_attention::varlen_bwd", mutates_args={"dq", "dk", "dv", "dkdv_lock", "dkdv_count"}
-)
+@custom_op("varlen_bwd", mutates_args={"dq", "dk", "dv", "dkdv_lock", "dkdv_count"})
 def _compileable_backward(
     do: torch.Tensor,
     dr: torch.Tensor,

@@ -4,7 +4,7 @@ import triton.language as tl
 
 from . import ALLOW_TF32, inv_log2, log2
 from .softplus import softplus
-
+from ..utils import custom_op
 
 @triton.jit
 def load_kv(K_blk_ptrs, V_blk_ptrs, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr):
@@ -419,7 +419,7 @@ def varlen_fwd(
         return o, rem, neg_log_acc
 
 
-@torch.library.custom_op("stickbreaking_attention::varlen_fwd", mutates_args={"o", "rem", "neg_log_acc", "W"})
+@custom_op("varlen_fwd", mutates_args={"o", "rem", "neg_log_acc", "W"})
 def _compileable_forward(
     q: torch.Tensor,
     k: torch.Tensor,
