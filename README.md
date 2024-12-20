@@ -29,6 +29,4 @@ cu_seqlens = torch.cumsum(lengths)
 o, rem = sb_attn_varlen(q, k, v, cu_seqlens, zero_start=False)
 ```
 
-
-
 Enjoy!
