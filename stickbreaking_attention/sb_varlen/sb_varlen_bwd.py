@@ -113,8 +113,6 @@ def _backward(
     acc_dtype: tl.constexpr = tl.float32,
 ):
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
-    BLOCK_M // BLOCK_N
-    # grid = (num_sequences, num_heads, num_seq_blocks)
     seq_id = tl.program_id(0)
     fhead_id = tl.program_id(1)
     seq_alloc_prog_id = tl.program_id(2)
