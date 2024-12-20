@@ -15,7 +15,7 @@ pytest -x tests
 Each mini-batch consists of concatenated sequences of different lengths.
 
 `sb_attn_varlen` implements the counterpart to Flash Attention's 
-[`flash_attn_varlen_func`](https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/flash_attn_interface.py#L1334).
+[`flash_attn_varlen_func`](https://github.com/Dao-AILab/flash-attention/blob/0dfb28174333d9eefb7c1dd4292690a8458d1e89/flash_attn/flash_attn_interface.py#L1360).
 Assuming we have an input batch that concatenates all documents/sequences into a long array, and the corresponding
 sequence lengths in the batch in an array `lengths`. 
 Then we can compute the cu_seqlens and pass that to `sb_attn_varlen`:
