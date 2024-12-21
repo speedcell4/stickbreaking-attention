@@ -12,10 +12,6 @@ FWD_BLOCK_N: tl.constexpr = 32
 BWD_BLOCK_M: tl.constexpr = 64
 BWD_BLOCK_N: tl.constexpr = 32
 
-log2 = math.log(2)
-inv_log2 = 1 / log2
-ALLOW_TF32 = True
-
 
 def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
     lens = cu_seqlens.clone()

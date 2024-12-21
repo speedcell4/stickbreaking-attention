@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import ALLOW_TF32, inv_log2, log2
+from ..utils import ALLOW_TF32, inv_log2
 from .sb_varlen_fwd import compute_block, load_kv
 
 from ..utils import custom_op

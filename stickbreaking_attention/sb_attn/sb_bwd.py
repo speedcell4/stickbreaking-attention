@@ -2,11 +2,9 @@ import torch
 import triton
 import triton.language as tl
 
-from ..sb_varlen import ALLOW_TF32, inv_log2
+from ..utils import ALLOW_TF32, inv_log2, custom_op
 from ..sb_varlen.sb_varlen_bwd import _backward_one_row
 from ..sb_varlen.sb_varlen_fwd import compute_block, load_kv
-
-from ..utils import custom_op
 
 
 def get_configs():

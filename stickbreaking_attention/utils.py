@@ -1,8 +1,12 @@
 import torch
 from typing import Callable, Iterable, Sequence
-import inspect
+import math
 
 PACKAGE_NAME = "stickbreaking_attention"
+log2 = math.log(2)
+inv_log2 = 1 / log2
+ALLOW_TF32 = True
+
 
 
 def _dispatch(func: Callable, compileable_fn: Callable, *args, **kwargs):

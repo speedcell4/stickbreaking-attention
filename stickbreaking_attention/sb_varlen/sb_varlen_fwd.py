@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import ALLOW_TF32, inv_log2, log2
+from ..utils import ALLOW_TF32, inv_log2
 from .softplus import softplus
 from ..utils import custom_op
 
