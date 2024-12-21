@@ -93,7 +93,8 @@ def _backward(
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+    cm = tl.where(N_range[:, None] >= N_range[None, :],
+                  1.0, 0.0).to(Q_ptr.type.element_ty)
 
     head_id = head_pid
     seq_prog_id = prog_id
@@ -109,7 +110,8 @@ def _backward(
     DK_head_seq_ptr = DK_ptr + stride_dkb * batch_id + stride_dkh * head_id
     DV_head_seq_ptr = DV_ptr + stride_dvb * batch_id + stride_dvh * head_id
     KV_Lock_head_seq_ptr = KV_Lock_ptr + stride_kvb * batch_id + stride_kvl * head_id
-    KV_Count_head_seq_ptr = KV_Count_ptr + stride_kvb * batch_id + stride_kvl * head_id
+    KV_Count_head_seq_ptr = KV_Count_ptr + \
+        stride_kvb * batch_id + stride_kvl * head_id
     _backward_one_row(
         seq_prog_id,
         seq_length,
@@ -172,8 +174,10 @@ def _bwd(do, dr, q, k, v, neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32):
 
     M_count = triton.cdiv(token_size, BLOCK_M)
     N_count = M_count * (BLOCK_M // BLOCK_N)
-    dkdv_lock = torch.zeros((batch_size, num_heads, N_count), dtype=torch.int32, device=q.device)
-    dkdv_count = torch.zeros((batch_size, num_heads, N_count), dtype=torch.bool, device=q.device)
+    dkdv_lock = torch.zeros((batch_size, num_heads, N_count),
+                            dtype=torch.int32, device=q.device)
+    dkdv_count = torch.zeros(
+        (batch_size, num_heads, N_count), dtype=torch.bool, device=q.device)
     _compileable_backward(
         do,
         dr,

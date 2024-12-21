@@ -8,6 +8,7 @@ from ..sb_varlen.softplus import softplus
 
 from ..utils import custom_op
 
+
 def get_configs():
     return [triton.Config({}, num_stages=s, num_warps=w) for s in [4] for w in [4]]
 
@@ -78,7 +79,8 @@ def _forward(
     N_range = tl.arange(0, BLOCK_N)
     D_range = tl.arange(0, BLOCK_D)
     D_mask = D_range < head_size
-    cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
+    cm = tl.where(N_range[:, None] >= N_range[None, :],
+                  1.0, 0.0).to(Q_ptr.type.element_ty)
 
     # First head block
     head_id = head_pid
@@ -139,7 +141,8 @@ def _fwd(q, k, v, logit_scale, no_grad=False, return_attention=False, BLOCK_M: i
     rem = torch.zeros_like(q[:, :, :, 0], device=q.device)
     neg_log_acc = torch.zeros_like(rem, device=q.device, dtype=torch.float32)
     if return_attention:
-        W = torch.full((batch_size, num_heads, token_size, token_size), 0.0, dtype=torch.float32, device=q.device)
+        W = torch.full((batch_size, num_heads, token_size, token_size),
+                       0.0, dtype=torch.float32, device=q.device)
     else:
         W = torch.empty((1, 1, 1, 1), device=q.device)
     _compileable_fwd(

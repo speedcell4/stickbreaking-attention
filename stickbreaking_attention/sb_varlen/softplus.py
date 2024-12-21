@@ -17,7 +17,8 @@ def _generate_asm(num_pack):
     for i in range(num_pack):
         inner_str = template.format(out_reg=i, in_reg=i + num_pack)
         out_str += "{" + inner_str + "}\n"
-    out_str = " ".join(out_str.split("\n"))  # flatten out because torch.compile doesn't like newlines
+    # flatten out because torch.compile doesn't like newlines
+    out_str = " ".join(out_str.split("\n"))
     return out_str
 
 

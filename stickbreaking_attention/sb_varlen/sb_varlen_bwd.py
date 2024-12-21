@@ -9,6 +9,7 @@ from .sb_varlen_fwd import compute_block, load_kv
 
 from ..utils import custom_op
 
+
 @triton.jit
 # TODO add two-step lock?
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr):
@@ -29,10 +30,14 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
             if count == 0:
                 tl.store(Count_ptr, True, eviction_policy="evict_last")
             else:
-                a += tl.load(A_ptrs, mask=N_mask[:, None], eviction_policy="evict_last")
-                b += tl.load(B_ptrs, mask=N_mask[:, None], eviction_policy="evict_last")
-            tl.store(A_ptrs, a, mask=N_mask[:, None], eviction_policy="evict_last")
-            tl.store(B_ptrs, b, mask=N_mask[:, None], eviction_policy="evict_last")
+                a += tl.load(A_ptrs,
+                             mask=N_mask[:, None], eviction_policy="evict_last")
+                b += tl.load(B_ptrs,
+                             mask=N_mask[:, None], eviction_policy="evict_last")
+            tl.store(A_ptrs, a, mask=N_mask[:, None],
+                     eviction_policy="evict_last")
+            tl.store(B_ptrs, b, mask=N_mask[:, None],
+                     eviction_policy="evict_last")
 
     else:
         mask = N_mask[:, None] & D_mask[None, :]
@@ -140,8 +145,8 @@ def _backward(
         N_range = tl.arange(0, BLOCK_N)
         D_range = tl.arange(0, BLOCK_D)
         D_mask = D_range < head_size
-        cm = tl.where(N_range[:, None] >= N_range[None, :], 1.0, 0.0).to(Q_ptr.type.element_ty)
-
+        cm = tl.where(N_range[:, None] >= N_range[None, :],
+                      1.0, 0.0).to(Q_ptr.type.element_ty)
 
         if seq_a_block_id >= 0:
             head_id = fhead_id * 2
@@ -155,7 +160,8 @@ def _backward(
             DK_head_seq_ptr = DK_ptr + stride_dkh * head_id + stride_dkn * seq_start_offset
             DV_head_seq_ptr = DV_ptr + stride_dvh * head_id + stride_dvn * seq_start_offset
             KV_Lock_head_seq_ptr = KV_Lock_ptr + stride_kvs * seq_id + stride_kvh * head_id
-            KV_Count_head_seq_ptr = KV_Count_ptr + stride_kvs * seq_id + stride_kvh * head_id
+            KV_Count_head_seq_ptr = KV_Count_ptr + \
+                stride_kvs * seq_id + stride_kvh * head_id
             _backward_one_row(
                 seq_a_block_id,
                 seq_length,
@@ -213,7 +219,8 @@ def _backward(
             DK_head_seq_ptr = DK_ptr + stride_dkh * head_id + stride_dkn * seq_start_offset
             DV_head_seq_ptr = DV_ptr + stride_dvh * head_id + stride_dvn * seq_start_offset
             KV_Lock_head_seq_ptr = KV_Lock_ptr + stride_kvs * seq_id + stride_kvh * head_id
-            KV_Count_head_seq_ptr = KV_Count_ptr + stride_kvs * seq_id + stride_kvh * head_id
+            KV_Count_head_seq_ptr = KV_Count_ptr + \
+                stride_kvs * seq_id + stride_kvh * head_id
             _backward_one_row(
                 seq_b_block_id,
                 seq_length,
@@ -319,16 +326,23 @@ def _backward_one_row(
 
     # Init pointers
     # Inputs
-    DO_blk_ptrs = DO_head_seq_ptr + (stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :])
+    DO_blk_ptrs = DO_head_seq_ptr + \
+        (stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :])
 
-    K_blk_ptrs = K_head_seq_ptr + (stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :])
-    Q_blk_ptrs = Q_head_seq_ptr + (stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :])
-    V_blk_ptrs = V_head_seq_ptr + (stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :])
+    K_blk_ptrs = K_head_seq_ptr + \
+        (stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :])
+    Q_blk_ptrs = Q_head_seq_ptr + \
+        (stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :])
+    V_blk_ptrs = V_head_seq_ptr + \
+        (stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :])
     A_blk_ptrs = A_head_seq_ptr + stride_am * M_blk_idxs
     # Outputs
-    DQ_blk_ptrs = DQ_head_seq_ptr + (stride_dqm * M_blk_idxs[:, None] + stride_dqd * D_range[None, :])
-    DK_blk_ptrs = DK_head_seq_ptr + (stride_dkn * N_blk_idxs[:, None] + stride_dkd * D_range[None, :])
-    DV_blk_ptrs = DV_head_seq_ptr + (stride_dvn * N_blk_idxs[:, None] + stride_dvd * D_range[None, :])
+    DQ_blk_ptrs = DQ_head_seq_ptr + \
+        (stride_dqm * M_blk_idxs[:, None] + stride_dqd * D_range[None, :])
+    DK_blk_ptrs = DK_head_seq_ptr + \
+        (stride_dkn * N_blk_idxs[:, None] + stride_dkd * D_range[None, :])
+    DV_blk_ptrs = DV_head_seq_ptr + \
+        (stride_dvn * N_blk_idxs[:, None] + stride_dvd * D_range[None, :])
     DR_blk_ptrs = DR_head_seq_ptr + stride_drm * M_blk_idxs
 
     # --- Load band vectors ---
@@ -357,7 +371,8 @@ def _backward_one_row(
     dq = tl.zeros((BLOCK_M, BLOCK_D), dtype=acc_dtype)
 
     fwd_cm = tl.trans(cm)
-    iters = (block_start_offset + BLOCK_M) // BLOCK_N  # always multiple of number of blocks.
+    # always multiple of number of blocks.
+    iters = (block_start_offset + BLOCK_M) // BLOCK_N
     # if (last_N_blk_idxs_end - sequence_start_offset) % BLOCK_N > 0:
     #     tl.device_print('remainder')
     # Iterate only up to start of sequence
@@ -393,9 +408,11 @@ def _backward_one_row(
             neg_log_acc = tl.where(M_mask, neg_log_acc, 0.0)
 
         # --- Do gradient stuff ---
-        att_dA = p * (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None])
+        att_dA = p * \
+            (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None])
         cumul_att_dA = (
-            tl.dot(att_dA.to(cm.dtype), fwd_cm, allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+            tl.dot(att_dA.to(cm.dtype), fwd_cm,
+                   allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
         )  # 180 -> 174
         # cumul_att_dA = tl.cumsum(att_dA, axis=1) + grad_prev_acc[:, None] # 180 -> 174
         grad_prev_acc += tl.sum(att_dA, axis=1)
@@ -403,7 +420,8 @@ def _backward_one_row(
         dqk = att_dA - beta * cumul_att_dA
 
         dq = tl.dot(dqk.to(k.dtype), k, acc=dq, allow_tf32=ALLOW_TF32)
-        block_dk = tl.dot(tl.trans(dqk).to(q.dtype), q, allow_tf32=ALLOW_TF32) * logit_scale
+        block_dk = tl.dot(tl.trans(dqk).to(q.dtype), q,
+                          allow_tf32=ALLOW_TF32) * logit_scale
         block_dv = tl.dot(tl.trans(p), do.to(p.dtype), allow_tf32=ALLOW_TF32)
         locked_add(
             KV_Lock_ptr + i,
@@ -464,8 +482,10 @@ def varlen_bwd(
         num_folded_heads = triton.cdiv(num_heads, 2)
         num_seq_blocks = triton.cdiv(max_seqlens, BLOCK_M) + 1
         N_count = num_seq_blocks * (BLOCK_M // BLOCK_N)
-        dkdv_lock = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.int32, device=q.device)
-        dkdv_count = torch.zeros((num_sequences, num_heads, N_count), dtype=torch.bool, device=q.device)
+        dkdv_lock = torch.zeros(
+            (num_sequences, num_heads, N_count), dtype=torch.int32, device=q.device)
+        dkdv_count = torch.zeros(
+            (num_sequences, num_heads, N_count), dtype=torch.bool, device=q.device)
         _compileable_backward(
             do,
             dr,

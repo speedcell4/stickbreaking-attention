@@ -4,6 +4,7 @@ import inspect
 
 PACKAGE_NAME = "stickbreaking_attention"
 
+
 def _dispatch(func: Callable, compileable_fn: Callable, *args, **kwargs):
     if torch.compiler.is_compiling():
         output = compileable_fn(*args, **kwargs)
@@ -19,10 +20,12 @@ def custom_op(
     schema: str | None = None,
 ) -> Callable:
     compileable_name = f"{PACKAGE_NAME}::{name}"
+
     def _inner(func: Callable):
         compileable_func = torch.library.custom_op(
             compileable_name, func, mutates_args=mutates_args, device_types=device_types, schema=schema
         )
+
         def _run(*args, **kwargs):
             return _dispatch(func, compileable_func, *args, **kwargs)
         # _run.__signature__ = inspect.signature(func)

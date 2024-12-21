@@ -1,3 +1,5 @@
+from .sb_varlen_fwd import varlen_fwd
+from .sb_varlen_bwd import varlen_bwd
 import math
 
 import torch
@@ -13,9 +15,6 @@ BWD_BLOCK_N: tl.constexpr = 32
 log2 = math.log(2)
 inv_log2 = 1 / log2
 ALLOW_TF32 = True
-
-from .sb_varlen_bwd import varlen_bwd
-from .sb_varlen_fwd import varlen_fwd
 
 
 def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
