@@ -48,53 +48,58 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
 
 
 def get_configs():
-    return [triton.Config({}, num_stages=s, num_warps=w) for s in [8] for w in [4]]
+    return [triton.Config({"BLOCK_M": mb, "BLOCK_N": nb}, num_stages=s, num_warps=w)
+            for mb in [64, 128]
+            for nb in [16, 32, 64]
+            for s in [8, 7, 6, 5, 4, 3, 2]
+            for w in [4, 2]]
 
 
 @triton.autotune(
-    configs=get_configs(), key=["token_size", "head_size"],
-    # reset_to_zero=["DK_ptr", "DV_ptr"]
+    configs=get_configs(),
+    key=["token_size", "head_size"],
+    reset_to_zero=["DK_ptr", "DV_ptr"]
 )
 @triton.jit
 def _backward(
     DO_ptr,
-    stride_doh,
-    stride_dom: tl.constexpr,
+    stride_doh: tl.constexpr,
+    stride_dom,
     stride_dod: tl.constexpr,
     DR_ptr,
     stride_drh,
-    stride_drm: tl.constexpr,
+    stride_drm,
     A_ptr,
     stride_ah,
-    stride_am: tl.constexpr,
+    stride_am,
     Q_ptr,
-    stride_qh,
-    stride_qm: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qm,
     stride_qd: tl.constexpr,
     K_ptr,
-    stride_kh,
-    stride_kn: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_kn,
     stride_kd: tl.constexpr,
     V_ptr,
-    stride_vh,
-    stride_vn: tl.constexpr,
+    stride_vh: tl.constexpr,
+    stride_vn,
     stride_vd: tl.constexpr,
     DQ_ptr,
-    stride_dqh,
-    stride_dqm: tl.constexpr,
+    stride_dqh: tl.constexpr,
+    stride_dqm,
     stride_dqd: tl.constexpr,
     DK_ptr,
-    stride_dkh,
-    stride_dkn: tl.constexpr,
+    stride_dkh: tl.constexpr,
+    stride_dkn,
     stride_dkd: tl.constexpr,
     DV_ptr,
-    stride_dvh,
-    stride_dvn: tl.constexpr,
+    stride_dvh: tl.constexpr,
+    stride_dvn,
     stride_dvd: tl.constexpr,
     KV_Lock_ptr,
     KV_Count_ptr,
-    stride_kvs: tl.constexpr,
-    stride_kvh: tl.constexpr,
+    stride_kvs,
+    stride_kvh,
     CSL_ptr,
     logit_scale,
     batch_size,
@@ -569,8 +574,8 @@ def _compileable_backward(
         token_size=token_size,
         head_size=dim_size,
         num_heads=num_heads,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
+        # BLOCK_M=BLOCK_M,
+        # BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         BLOCK_CSL=triton.next_power_of_2(batch_size),
         NO_D_MASK=BLOCK_D == dim_size,
