@@ -121,6 +121,7 @@ def _backward(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     acc_dtype: tl.constexpr = tl.float32,
+    attend_current: tl.constexpr = False
 ):
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     seq_id = tl.program_id(0)
@@ -206,6 +207,7 @@ def _backward(
                 BLOCK_M,
                 BLOCK_N,
                 acc_dtype,
+                attend_current=attend_current
             )
         if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
             head_id = fhead_id * 2 + 1
@@ -265,6 +267,7 @@ def _backward(
                 BLOCK_M,
                 BLOCK_N,
                 acc_dtype,
+                attend_current=attend_current
             )
 
 
@@ -314,6 +317,7 @@ def _backward_one_row(
     BLOCK_N: tl.constexpr,
     acc_dtype: tl.constexpr = tl.float32,
     is_compiling: tl.constexpr = False,
+    attend_current: tl.constexpr = False,
 ):
     # Loading thread information
     block_start_offset = BLOCK_M * seq_prog_id
@@ -400,6 +404,7 @@ def _backward_one_row(
             cm,
             on_band,
             ALLOW_TF32,
+            attend_current=attend_current,
             backward=True,
             is_compiling=is_compiling,
         )
@@ -461,6 +466,7 @@ def varlen_bwd(
     max_seqlens: int,
     neg_log_acc: torch.Tensor,
     logit_scale,
+    attend_current=False,
     BLOCK_M=64,
     BLOCK_N=32,
 ):
@@ -509,6 +515,7 @@ def varlen_bwd(
             num_sequences,
             num_folded_heads,
             num_seq_blocks,
+            attend_current=attend_current
         )
     return dq, dk, dv
 
@@ -537,6 +544,7 @@ def _compileable_backward(
     num_sequences: int,
     num_folded_heads: int,
     num_seq_blocks: int,
+    attend_current: bool = False,
 ) -> None:
     BLOCK_D = triton.next_power_of_2(dim_size)
     _backward[num_sequences, num_folded_heads, num_seq_blocks](
@@ -603,4 +611,5 @@ def _compileable_backward(
         NO_N_MASK=False,
         ALLOW_TF32=ALLOW_TF32,
         inv_log2=inv_log2,
+        attend_current=attend_current
     )

@@ -80,6 +80,7 @@ def _backward(
     BLOCK_N: tl.constexpr,
     acc_dtype: tl.constexpr = tl.float32,
     is_compiling: tl.constexpr = False,
+    attend_current: tl.constexpr = False,
 ):
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     batch_id = tl.program_id(0)
@@ -155,10 +156,12 @@ def _backward(
         BLOCK_N,
         acc_dtype,
         is_compiling=is_compiling,
+        attend_current=attend_current,
     )
 
 
-def _bwd(do, dr, q, k, v, neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32):
+def _bwd(do, dr, q, k, v, neg_log_acc, logit_scale,
+         attend_current=False, BLOCK_M=64, BLOCK_N=32):
     batch_size, num_heads, token_size, dim_size = q.size()
     M_count = triton.cdiv(token_size, BLOCK_M)
     N_count = triton.cdiv(token_size, BLOCK_N)
@@ -184,6 +187,7 @@ def _bwd(do, dr, q, k, v, neg_log_acc, logit_scale, BLOCK_M=64, BLOCK_N=32):
         v,
         neg_log_acc,
         logit_scale,
+        attend_current,
         BLOCK_M,
         BLOCK_N,
         batch_size,
@@ -210,6 +214,7 @@ def _compileable_backward(
     v: torch.Tensor,
     neg_log_acc: torch.Tensor,
     logit_scale: float,
+    attend_current: bool,
     BLOCK_M: int,
     BLOCK_N: int,
     batch_size: int,
@@ -274,6 +279,7 @@ def _compileable_backward(
         num_heads * N_count,
         N_count,
         logit_scale=logit_scale,
+        attend_current=attend_current,
         batch_size=batch_size,
         token_size=token_size,
         head_size=dim_size,

@@ -26,11 +26,11 @@ def ref_fwd(q, k, v, lengths, attend_current=False):
         outputs.append(o[0])
     return torch.cat(outputs, 1)
 
-def ref_bwd(do, q, k, v, lengths):
+def ref_bwd(do, q, k, v, lengths, attend_current=False):
     q.requires_grad = True
     k.requires_grad = True
     v.requires_grad = True
-    output = ref_fwd(q, k, v, lengths)
+    output = ref_fwd(q, k, v, lengths, attend_current=attend_current)
     output.backward(do)
     dq = q.grad
     dk = k.grad
@@ -66,8 +66,9 @@ class TestClass:
     @pytest.mark.parametrize('head_dim', [64, 32, 16, 50])
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
     @pytest.mark.parametrize('dtype', [torch.bfloat16])
-    @pytest.mark.parametrize('forward_only', [True])
-    def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
+    @pytest.mark.parametrize('forward_only', [False])
+    @pytest.mark.parametrize('attend_current', [False, True])
+    def test_varlen(self, batch_size, num_heads, head_dim, length, attend_current, dtype, forward_only):
         set_seed(1337)
         torch.set_printoptions(linewidth=110, edgeitems=30)
         device = torch.device('cuda:0')
@@ -82,7 +83,6 @@ class TestClass:
         q = q.to(dtype)
         k = k.to(dtype)
         v = v.to(dtype)
-
         q.requires_grad_()
         k.requires_grad_()
         v.requires_grad_()
@@ -92,9 +92,10 @@ class TestClass:
                                     cu_seqlens=cu_seqlens,
                                     max_seqlens=torch.max(lengths).item(),
                                     inv_temp=1 / math.sqrt(q.size(-1)),
-                                    zero_start=False)
+                                    zero_start=False,
+                                    attend_current=attend_current)
             o = o + rem[..., None] * v
-            ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths)
+            ref_out, ref_dq, ref_dk, ref_dv = ref_bwd(do, q, k, v, lengths, attend_current=attend_current)
         eps = 0.05
         torch.cuda.synchronize()
         assert_close("o", ref_out, o, eps)

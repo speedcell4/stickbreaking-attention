@@ -7,18 +7,21 @@ from stickbreaking_attention.sb_ref import stickbreaking
 from .test_varlen import assert_close
 
 
-def ref_fwd(q, k, v, length):
+def ref_fwd(q, k, v, length, attend_current=False):
     cm = torch.ones(length, length).tril(-1).to(q)
-    mask = torch.ones(length, length).triu(0).cuda().bool()
+    if attend_current:
+        mask = torch.ones(length, length).triu(1).cuda().bool()
+    else:
+        mask = torch.ones(length, length).triu(0).cuda().bool()
     o, rem = stickbreaking(q, k, v, mask, cm)
     o = o + rem[..., None] * v
     return o
 
-def ref_fwdbwd(do, q, k, v, length):
+def ref_fwdbwd(do, q, k, v, length, attend_current=False):
     q.requires_grad = True
     k.requires_grad = True
     v.requires_grad = True
-    output = ref_fwd(q, k, v, length)
+    output = ref_fwd(q, k, v, length, attend_current)
     output.backward(do)
     dq = q.grad
     dk = k.grad
@@ -37,7 +40,8 @@ class TestClass:
     @pytest.mark.parametrize('length', [4096, 2048, 1024, 512, 256, 500])
     @pytest.mark.parametrize('dtype', [torch.bfloat16])
     @pytest.mark.parametrize('forward_only', [False])
-    def test_varlen(self, batch_size, num_heads, head_dim, length, dtype, forward_only):
+    @pytest.mark.parametrize('attend_current', [False, True])
+    def test_varlen(self, batch_size, num_heads, head_dim, attend_current, length, dtype, forward_only):
         set_seed(1337)
         torch.set_printoptions(linewidth=110, edgeitems=30)
         device = torch.device('cuda:0')
@@ -52,9 +56,14 @@ class TestClass:
         do = torch.randn(input_dims, device=device, dtype=dtype)
 
         with torch.cuda.device(device):
-            o, rem= sb_attn(q, k, v, inv_temp=1 / math.sqrt(q.size(-1)))
+            o, rem= sb_attn(
+                q, k, v,
+                inv_temp=1 / math.sqrt(q.size(-1)),
+                attend_current=attend_current
+            )
             o = o + rem[..., None] * v
-            ref_out, ref_dq, ref_dk, ref_dv = ref_fwdbwd(do, q, k, v, length)
+            ref_out, ref_dq, ref_dk, ref_dv = ref_fwdbwd(do, q, k, v, length,
+                                                         attend_current=attend_current)
         eps = 0.05
         torch.cuda.synchronize()
         assert_close("o", ref_out, o, eps)

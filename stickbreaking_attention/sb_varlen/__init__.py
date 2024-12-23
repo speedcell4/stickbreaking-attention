@@ -24,7 +24,7 @@ def calculate_programs_needed(cu_seqlens: torch.Tensor, BLOCK_SIZE):
 class StickBreakingAttention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens, max_seqlens, inv_temp):
+    def forward(ctx, q, k, v, cu_seqlens, max_seqlens, inv_temp, attend_current):
         no_grad = not ctx.needs_input_grad[0]
         logit_scale = inv_temp
         o, rem, neg_log_acc = varlen_fwd(
@@ -34,6 +34,7 @@ class StickBreakingAttention(torch.autograd.Function):
             cu_seqlens,
             max_seqlens,
             logit_scale=inv_temp,
+            attend_current=attend_current,
             no_grad=no_grad,
             BLOCK_M=FWD_BLOCK_M,
             BLOCK_N=FWD_BLOCK_N,
@@ -41,12 +42,14 @@ class StickBreakingAttention(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, neg_log_acc, cu_seqlens)
         ctx.logit_scale = logit_scale
         ctx.max_seqlens = max_seqlens
+        ctx.attend_current = attend_current
         return o, rem
 
     @staticmethod
     def backward(ctx, do, drem):
         logit_scale = ctx.logit_scale
         max_seqlens = ctx.max_seqlens
+        attend_current = ctx.attend_current
         q, k, v, neg_log_acc, cu_seqlens = ctx.saved_tensors
         dq, dk, dv = varlen_bwd(
             do,
@@ -58,21 +61,22 @@ class StickBreakingAttention(torch.autograd.Function):
             max_seqlens,
             neg_log_acc,
             logit_scale,
+            attend_current=attend_current,
             BLOCK_M=BWD_BLOCK_M,
             BLOCK_N=BWD_BLOCK_N,
         )
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, None
 
 
-def sb_attn_varlen(q, k, v, cu_seqlens, max_seqlens, inv_temp=None, zero_start=True):
+def sb_attn_varlen(q, k, v, cu_seqlens, max_seqlens, inv_temp=None, zero_start=True, attend_current=False):
     if zero_start:
         assert cu_seqlens[0] == 0
         cu_seqlens = cu_seqlens[1:]
     if inv_temp is None:
         inv_temp = 1 / math.sqrt(q.size(-1))
 
-    return sb_attn_varlen_(q, k, v, inv_temp, cu_seqlens, max_seqlens)
+    return sb_attn_varlen_(q, k, v, inv_temp, cu_seqlens, max_seqlens, attend_current)
 
 
-def sb_attn_varlen_(q, k, v, inv_temp, cu_seqlens, max_seqlens):
-    return StickBreakingAttention.apply(q, k, v, cu_seqlens, max_seqlens, inv_temp)
+def sb_attn_varlen_(q, k, v, inv_temp, cu_seqlens, max_seqlens, attend_current):
+    return StickBreakingAttention.apply(q, k, v, cu_seqlens, max_seqlens, inv_temp, attend_current)

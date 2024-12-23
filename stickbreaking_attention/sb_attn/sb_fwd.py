@@ -49,6 +49,7 @@ def _forward(
     stride_wm,
     stride_wn,
     logit_scale: tl.constexpr,
+    attend_current: tl.constexpr,
     batch_size,
     token_size,
     head_size: tl.constexpr,
@@ -130,11 +131,15 @@ def _forward(
         no_grad,
         acc_dtype,
         return_attention,
+        attend_current=attend_current,
         is_compiling=is_compiling,
     )
 
 
-def _fwd(q, k, v, logit_scale, no_grad=False, return_attention=False, BLOCK_M: int = 64, BLOCK_N: int = 32):
+def _fwd(q, k, v, logit_scale,
+         attend_current=False,
+         no_grad=False, return_attention=False,
+         BLOCK_M: int = 64, BLOCK_N: int = 32):
     batch_size, num_heads, token_size, dim_size = q.size()
     o = torch.empty_like(q)
     rem = torch.zeros_like(q[:, :, :, 0], device=q.device)
@@ -161,6 +166,7 @@ def _fwd(q, k, v, logit_scale, no_grad=False, return_attention=False, BLOCK_M: i
         rem,
         neg_log_acc,
         W,
+        attend_current=attend_current,
     )
     if return_attention:
         return o, rem, neg_log_acc, W
@@ -186,6 +192,7 @@ def _compileable_fwd(
     rem: torch.Tensor,
     neg_log_acc: torch.Tensor,
     W: torch.Tensor,
+    attend_current: bool,
 ) -> None:
     num_folded_heads = num_heads
     num_seq_blocks = triton.cdiv(token_size, BLOCK_M)
@@ -231,6 +238,7 @@ def _compileable_fwd(
         head_size=dim_size,
         num_heads=num_heads,
         no_grad=no_grad,
+        attend_current=attend_current,
         BLOCK_D=BLOCK_D,
         NO_D_MASK=BLOCK_D == dim_size,
         NO_M_MASK=(token_size % BLOCK_M) == 0,

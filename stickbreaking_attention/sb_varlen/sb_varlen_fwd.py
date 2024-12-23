@@ -35,17 +35,20 @@ def compute_block(
     on_band: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     backward: tl.constexpr,
+    attend_current: tl.constexpr = False,
     use_cumsum: tl.constexpr = False,
     is_compiling: tl.constexpr = False,
 ):
-
     qk = tl.dot(q, tl.trans(k), allow_tf32=ALLOW_TF32) * qk_scale
 
     # log_om_beta (one minus beta) : log(1 - \beta)
     log_om_beta = -softplus(qk, is_compiling=is_compiling)
 
-    if on_band:
-        block_mask = M_blk_idxs[:, None] > N_blk_idxs[None, :]  # diagonal
+    if on_band:  # diagonal
+        if attend_current:
+            block_mask = M_blk_idxs[:, None] >= N_blk_idxs[None, :]
+        else:
+            block_mask = M_blk_idxs[:, None] > N_blk_idxs[None, :]
         log_om_beta = tl.where(block_mask, log_om_beta, 0.0)
         if backward:
             neg_log_acc -= tl.sum(log_om_beta, axis=1)
@@ -116,6 +119,7 @@ def _forward_one_row(
     return_attention: tl.constexpr = False,
     is_compiling: tl.constexpr = False,
     use_cumsum: tl.constexpr = False,
+    attend_current: tl.constexpr = False,
 ):
     # Loading thread information
     block_start_offset = BLOCK_M * seq_block_id
@@ -181,6 +185,7 @@ def _forward_one_row(
             cm,
             on_band,
             ALLOW_TF32,
+            attend_current=attend_current,
             backward=False,
             is_compiling=is_compiling,
             use_cumsum=use_cumsum,
@@ -265,6 +270,7 @@ def _forward(
     acc_dtype: tl.constexpr = tl.float32,
     return_attention: tl.constexpr = False,
     use_cumsum: tl.constexpr = False,
+    attend_current: tl.constexpr = False
 ):
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     seq_id = tl.program_id(0)
@@ -344,6 +350,7 @@ def _forward(
                 acc_dtype,
                 return_attention,
                 use_cumsum=use_cumsum,
+                attend_current=attend_current
             )
         if seq_b_block_id >= 0 and fhead_id * 2 + 1 < num_heads:
             # Reverse head block
@@ -394,11 +401,12 @@ def _forward(
                 acc_dtype,
                 return_attention,
                 use_cumsum=use_cumsum,
+                attend_current=attend_current
             )
 
 
 def varlen_fwd(
-    q, k, v, cu_seqlens, max_seqlens, logit_scale, no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32
+    q, k, v, cu_seqlens, max_seqlens, logit_scale, attend_current=False, no_grad=False, return_attention=False, BLOCK_M=64, BLOCK_N=32
 ):
     batch_size = cu_seqlens.size(0)
     num_heads, token_size, dim_size = q.size()
@@ -430,6 +438,7 @@ def varlen_fwd(
         rem,
         neg_log_acc,
         W,
+        attend_current=attend_current
     )
     if return_attention:
         return o, rem, neg_log_acc, W
@@ -457,6 +466,7 @@ def _compileable_forward(
     rem: torch.Tensor,
     neg_log_acc: torch.Tensor,
     W: torch.Tensor,
+    attend_current: bool,
 ) -> None:
     num_sequences = batch_size
     num_folded_heads = triton.cdiv(num_heads, 2)
@@ -502,4 +512,5 @@ def _compileable_forward(
         return_attention=return_attention,
         acc_dtype=tl.float32,
         use_cumsum=False,
+        attend_current=attend_current
     )
