@@ -6,6 +6,7 @@ from stickbreaking_attention.sb_varlen import sb_attn_varlen
 import triton
 from flash_attn import flash_attn_varlen_func
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, rotate_half
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers import set_seed
 from stickbreaking_attention.sb_ref import stickbreaking
 
@@ -111,7 +112,8 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, b
     elif provider == "triton":
         fun = lambda: tri_fwdbwd(do, q, k, v, lengths)
     elif provider == "flash":
-        rope = LlamaRotaryEmbedding(dim=head_dim).to(device)
+        config = LlamaConfig(max_position_embeddings=length)
+        rope = LlamaRotaryEmbedding(config).to(device)
         fun = lambda: flash_fwdbwd(rope, position_ids, do, q, k, v, lengths)
     if bwd:
         def fun_():

@@ -216,11 +216,16 @@ def _forward_one_row(
 
 
 def get_configs():
-    return [triton.Config({"BLOCK_M": mb, "BLOCK_N": nb}, num_stages=s, num_warps=w)
-            for mb in [64, 128]
-            for nb in [16, 32, 64]
-            for s in [4, 2, 3, 5, 6, 7, 8]
-            for w in [4, 2]]
+    return [triton.Config({}, num_stages=s, num_warps=w)
+            # for mb in [64, 128]
+            # for nb in [16, 32, 64]
+            for s in [4] # , 2, 3, 5, 6, 7, 8]
+            for w in [4]] # , 2]]
+            # for mb in [64]
+            # for nb in [32]
+            # for s in [4]
+            # for w in [4]]
+
 
 
 @triton.autotune(configs=get_configs(), key=["head_size"])
@@ -512,5 +517,6 @@ def _compileable_forward(
         return_attention=return_attention,
         acc_dtype=tl.float32,
         use_cumsum=False,
-        attend_current=attend_current
+        attend_current=attend_current,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N
     )
