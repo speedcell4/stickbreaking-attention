@@ -26,9 +26,10 @@ def _generate_constraints(num_pack):
     return ",".join("=r" for i in range(num_pack)) + "," + ",".join("r" for i in range(num_pack))
 
 
-NUM_REG: tl.constexpr = 1
-asm_str: tl.constexpr = _generate_asm(NUM_REG)
-constraints_str: tl.constexpr = _generate_constraints(NUM_REG)
+_NUM_REG = 1
+asm_str: tl.constexpr = tl.constexpr(_generate_asm(_NUM_REG))
+constraints_str: tl.constexpr = tl.constexpr(_generate_constraints(_NUM_REG))
+NUM_REG: tl.constexpr = tl.constexpr(_NUM_REG)
 
 
 @triton.jit

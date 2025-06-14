@@ -11,7 +11,7 @@ from ..utils import custom_op
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr,
-               EVICTION_POLICY: tl.constexpr=""):
+               EVICTION_POLICY: tl.constexpr=tl.constexpr("")):
     while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
         pass
     # tl.device_print("Start locked add.")
