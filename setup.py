@@ -1,18 +1,21 @@
 import os
-from setuptools import setup, find_packages
+
+from setuptools import find_packages, setup
+
 
 def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
+
 setup(
-    name = "stickbreaking_attention",
-    version = "0.0.0",
-    author = "Shawn Tan",
-    author_email = "shawntan@ibm.com",
-    description = "Triton implementation of Stick-breaking attention",
-    license = "Apache License",
-    keywords = "triton pytorch llm stickbreaking attention",
-    url = "https://github.com/shawntan/scattermoe",
+    name="stickbreaking_attention",
+    version="0.0.0",
+    author="Shawn Tan",
+    author_email="shawntan@ibm.com",
+    description="Triton implementation of Stick-breaking attention",
+    license="Apache License",
+    keywords="triton pytorch llm stickbreaking attention",
+    url="https://github.com/shawntan/scattermoe",
     packages=find_packages(),
     long_description=read('README.md'),
     python_requires='>=3.10.10',
@@ -26,4 +29,3 @@ setup(
         "License :: OSI Approved :: Apache Software License",
     ],
 )
-

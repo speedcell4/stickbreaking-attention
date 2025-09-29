@@ -1,11 +1,10 @@
-from .sb_varlen_fwd import varlen_fwd
-from .sb_varlen_bwd import varlen_bwd
 import math
 
 import torch
 import triton.language as tl
-from torch.nn import functional as F
 
+from .sb_varlen_bwd import varlen_bwd
+from .sb_varlen_fwd import varlen_fwd
 
 FWD_BLOCK_M: tl.constexpr = 64
 FWD_BLOCK_N: tl.constexpr = 32

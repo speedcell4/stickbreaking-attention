@@ -1,15 +1,15 @@
-import torch
-import pytest
 import math
-from torch.nn import functional as F
-from stickbreaking_attention.sb_varlen import sb_attn_varlen
+
+import torch
 import triton
 from flash_attn import flash_attn_varlen_func
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, rotate_half
-from transformers.models.llama.configuration_llama import LlamaConfig
+from torch.nn import functional as F
 from transformers import set_seed
-from stickbreaking_attention.sb_ref import stickbreaking
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, rotate_half
 
+from stickbreaking_attention.sb_ref import stickbreaking
+from stickbreaking_attention.sb_varlen import sb_attn_varlen
 
 
 def ref_fwd(q, k, v, lengths):
@@ -34,6 +34,7 @@ def ref_fwd(q, k, v, lengths):
         outputs.append(o[0])
     return torch.cat(outputs, 1)
 
+
 def ref_fwdbwd(do, q, k, v, lengths):
     o = ref_fwd(q, k, v, lengths)
     return o
@@ -51,6 +52,7 @@ def tri_fwdbwd(do, q, k, v, lengths):
                             zero_start=False)
     # o = o + rem[..., None] * v
     return o
+
 
 def flash_fwdbwd(rope, position_ids, do, q, k, v, lengths):
     cos, sin = rope(v, position_ids)
@@ -77,6 +79,8 @@ providers = [
     ("triton", "Stickbreaking", ("blue", "-")),
     ("flash", "Flash Attention", ("green", "-")),
 ]
+
+
 @triton.testing.perf_report([
     triton.testing.Benchmark(
         x_names=["length"],
@@ -107,7 +111,7 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, b
     do = torch.randn((num_heads, total_length, head_dim), device=device, dtype=dtype)
     position_ids = torch.arange(q.size(1), device=device, dtype=torch.int32)[None, :]
 
-    if provider== "reference":
+    if provider == "reference":
         fun = lambda: ref_fwdbwd(do, q, k, v, lengths)
     elif provider == "triton":
         fun = lambda: tri_fwdbwd(do, q, k, v, lengths)
@@ -119,10 +123,10 @@ def benchmark_varlen(batch_size, num_heads, head_dim, length, dtype, provider, b
         def fun_():
             o = fun()
             dq, dk, dv = torch.autograd.grad(o, inputs=(q, k, v), grad_outputs=do)
+
         return triton.testing.do_bench(fun_, warmup=warmup, rep=rep)
     else:
         return triton.testing.do_bench(fun, warmup=warmup, rep=rep)
-
 
 
 if __name__ == "__main__":

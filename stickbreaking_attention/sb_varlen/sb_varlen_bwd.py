@@ -4,14 +4,13 @@ import torch
 import triton
 import triton.language as tl
 
-from ..utils import ALLOW_TF32, inv_log2
 from .sb_varlen_fwd import compute_block, load_kv
+from ..utils import ALLOW_TF32, custom_op, inv_log2
 
-from ..utils import custom_op
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr,
-               EVICTION_POLICY: tl.constexpr=tl.constexpr("")):
+               EVICTION_POLICY: tl.constexpr = tl.constexpr("")):
     while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
         pass
     # tl.device_print("Start locked add.")
@@ -40,22 +39,23 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_m
                      eviction_policy=EVICTION_POLICY)
 
     else:
-    # if True: # TODO  delete
-         mask = N_mask[:, None] & D_mask[None, :]
-         if count == 0:
-             tl.store(Count_ptr, 1, eviction_policy=EVICTION_POLICY)
-         else:
-             a += tl.load(A_ptrs, mask=mask, eviction_policy=EVICTION_POLICY)
-             b += tl.load(B_ptrs, mask=mask, eviction_policy=EVICTION_POLICY)
-         tl.store(A_ptrs, a, mask=mask, eviction_policy=EVICTION_POLICY)
-         tl.store(B_ptrs, b, mask=mask, eviction_policy=EVICTION_POLICY)
+        # if True: # TODO  delete
+        mask = N_mask[:, None] & D_mask[None, :]
+        if count == 0:
+            tl.store(Count_ptr, 1, eviction_policy=EVICTION_POLICY)
+        else:
+            a += tl.load(A_ptrs, mask=mask, eviction_policy=EVICTION_POLICY)
+            b += tl.load(B_ptrs, mask=mask, eviction_policy=EVICTION_POLICY)
+        tl.store(A_ptrs, a, mask=mask, eviction_policy=EVICTION_POLICY)
+        tl.store(B_ptrs, b, mask=mask, eviction_policy=EVICTION_POLICY)
 
     # tl.device_print("End locked add.")
     tl.atomic_xchg(Lock_ptr, 0)
 
+
 @triton.jit
 def _locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_mask, NO_D_MASK: tl.constexpr,
-               EVICTION_POLICY: tl.constexpr=""):
+                EVICTION_POLICY: tl.constexpr = ""):
     # count = tl.load(Count_ptr, eviction_policy=EVICTION_POLICY)
     if NO_D_MASK:
         if NO_N_MASK:
@@ -68,7 +68,7 @@ def _locked_add(Lock_ptr, Count_ptr, A_ptrs, a, B_ptrs, b, N_mask, NO_N_MASK, D_
         mask = N_mask[:, None] & D_mask[None, :]
         tl.atomic_add(A_ptrs, a, mask=mask)
         tl.atomic_add(B_ptrs, b, mask=mask)
- 
+
 
 def get_configs():
     return [triton.Config({}, num_stages=s, num_warps=w)
@@ -82,7 +82,6 @@ def get_configs():
             for w in [4]]
 
 
-
 @triton.autotune(
     configs=get_configs(),
     key=["token_size", "head_size"],
@@ -90,61 +89,61 @@ def get_configs():
 )
 @triton.jit
 def _backward(
-    DO_ptr,
-    stride_doh: tl.constexpr,
-    stride_dom,
-    stride_dod: tl.constexpr,
-    DR_ptr,
-    stride_drh,
-    stride_drm,
-    A_ptr,
-    stride_ah,
-    stride_am,
-    Q_ptr,
-    stride_qh: tl.constexpr,
-    stride_qm,
-    stride_qd: tl.constexpr,
-    K_ptr,
-    stride_kh: tl.constexpr,
-    stride_kn,
-    stride_kd: tl.constexpr,
-    V_ptr,
-    stride_vh: tl.constexpr,
-    stride_vn,
-    stride_vd: tl.constexpr,
-    DQ_ptr,
-    stride_dqh: tl.constexpr,
-    stride_dqm,
-    stride_dqd: tl.constexpr,
-    DK_ptr,
-    stride_dkh: tl.constexpr,
-    stride_dkn,
-    stride_dkd: tl.constexpr,
-    DV_ptr,
-    stride_dvh: tl.constexpr,
-    stride_dvn,
-    stride_dvd: tl.constexpr,
-    KV_Lock_ptr,
-    KV_Count_ptr,
-    stride_kvs,
-    stride_kvh,
-    CSL_ptr,
-    logit_scale,
-    batch_size,
-    token_size,
-    head_size: tl.constexpr,
-    num_heads: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    BLOCK_CSL: tl.constexpr,
-    NO_D_MASK: tl.constexpr,
-    NO_M_MASK: tl.constexpr,
-    NO_N_MASK: tl.constexpr,
-    ALLOW_TF32: tl.constexpr,
-    inv_log2: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    acc_dtype: tl.constexpr = tl.float32,
-    attend_current: tl.constexpr = False
+        DO_ptr,
+        stride_doh: tl.constexpr,
+        stride_dom,
+        stride_dod: tl.constexpr,
+        DR_ptr,
+        stride_drh,
+        stride_drm,
+        A_ptr,
+        stride_ah,
+        stride_am,
+        Q_ptr,
+        stride_qh: tl.constexpr,
+        stride_qm,
+        stride_qd: tl.constexpr,
+        K_ptr,
+        stride_kh: tl.constexpr,
+        stride_kn,
+        stride_kd: tl.constexpr,
+        V_ptr,
+        stride_vh: tl.constexpr,
+        stride_vn,
+        stride_vd: tl.constexpr,
+        DQ_ptr,
+        stride_dqh: tl.constexpr,
+        stride_dqm,
+        stride_dqd: tl.constexpr,
+        DK_ptr,
+        stride_dkh: tl.constexpr,
+        stride_dkn,
+        stride_dkd: tl.constexpr,
+        DV_ptr,
+        stride_dvh: tl.constexpr,
+        stride_dvn,
+        stride_dvd: tl.constexpr,
+        KV_Lock_ptr,
+        KV_Count_ptr,
+        stride_kvs,
+        stride_kvh,
+        CSL_ptr,
+        logit_scale,
+        batch_size,
+        token_size,
+        head_size: tl.constexpr,
+        num_heads: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_CSL: tl.constexpr,
+        NO_D_MASK: tl.constexpr,
+        NO_M_MASK: tl.constexpr,
+        NO_N_MASK: tl.constexpr,
+        ALLOW_TF32: tl.constexpr,
+        inv_log2: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        acc_dtype: tl.constexpr = tl.float32,
+        attend_current: tl.constexpr = False
 ):
     tl.static_assert(BLOCK_M % BLOCK_N == 0)
     seq_id = tl.program_id(0)
@@ -185,7 +184,7 @@ def _backward(
             DV_head_seq_ptr = DV_ptr + stride_dvh * head_id + stride_dvn * seq_start_offset
             KV_Lock_head_seq_ptr = KV_Lock_ptr + stride_kvs * seq_id + stride_kvh * head_id
             KV_Count_head_seq_ptr = KV_Count_ptr + \
-                stride_kvs * seq_id + stride_kvh * head_id
+                                    stride_kvs * seq_id + stride_kvh * head_id
             _backward_one_row(
                 seq_a_block_id,
                 seq_length,
@@ -245,7 +244,7 @@ def _backward(
             DV_head_seq_ptr = DV_ptr + stride_dvh * head_id + stride_dvn * seq_start_offset
             KV_Lock_head_seq_ptr = KV_Lock_ptr + stride_kvs * seq_id + stride_kvh * head_id
             KV_Count_head_seq_ptr = KV_Count_ptr + \
-                stride_kvs * seq_id + stride_kvh * head_id
+                                    stride_kvs * seq_id + stride_kvh * head_id
             _backward_one_row(
                 seq_b_block_id,
                 seq_length,
@@ -296,51 +295,51 @@ def _backward(
 
 @triton.jit
 def _backward_one_row(
-    seq_prog_id,
-    seq_length,
-    qk_scale,
-    M_range,
-    N_range,
-    D_range,
-    D_mask,
-    cm,
-    DO_head_seq_ptr,
-    stride_dom,
-    stride_dod: tl.constexpr,
-    DR_head_seq_ptr,
-    stride_drm,
-    A_head_seq_ptr,
-    stride_am: tl.constexpr,
-    Q_head_seq_ptr,
-    stride_qm,
-    stride_qd: tl.constexpr,
-    K_head_seq_ptr,
-    stride_kn,
-    stride_kd: tl.constexpr,
-    V_head_seq_ptr,
-    stride_vn,
-    stride_vd: tl.constexpr,
-    DQ_head_seq_ptr,
-    stride_dqm,
-    stride_dqd: tl.constexpr,
-    DK_head_seq_ptr,
-    stride_dkn,
-    stride_dkd: tl.constexpr,
-    DV_head_seq_ptr,
-    stride_dvn,
-    stride_dvd: tl.constexpr,
-    KV_Lock_ptr,
-    KV_Count_ptr,
-    logit_scale,
-    BLOCK_D: tl.constexpr,
-    NO_D_MASK: tl.constexpr,
-    NO_M_MASK: tl.constexpr,
-    ALLOW_TF32: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    acc_dtype: tl.constexpr = tl.float32,
-    is_compiling: tl.constexpr = False,
-    attend_current: tl.constexpr = False,
+        seq_prog_id,
+        seq_length,
+        qk_scale,
+        M_range,
+        N_range,
+        D_range,
+        D_mask,
+        cm,
+        DO_head_seq_ptr,
+        stride_dom,
+        stride_dod: tl.constexpr,
+        DR_head_seq_ptr,
+        stride_drm,
+        A_head_seq_ptr,
+        stride_am: tl.constexpr,
+        Q_head_seq_ptr,
+        stride_qm,
+        stride_qd: tl.constexpr,
+        K_head_seq_ptr,
+        stride_kn,
+        stride_kd: tl.constexpr,
+        V_head_seq_ptr,
+        stride_vn,
+        stride_vd: tl.constexpr,
+        DQ_head_seq_ptr,
+        stride_dqm,
+        stride_dqd: tl.constexpr,
+        DK_head_seq_ptr,
+        stride_dkn,
+        stride_dkd: tl.constexpr,
+        DV_head_seq_ptr,
+        stride_dvn,
+        stride_dvd: tl.constexpr,
+        KV_Lock_ptr,
+        KV_Count_ptr,
+        logit_scale,
+        BLOCK_D: tl.constexpr,
+        NO_D_MASK: tl.constexpr,
+        NO_M_MASK: tl.constexpr,
+        ALLOW_TF32: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        acc_dtype: tl.constexpr = tl.float32,
+        is_compiling: tl.constexpr = False,
+        attend_current: tl.constexpr = False,
 ):
     # Loading thread information
     block_start_offset = BLOCK_M * seq_prog_id
@@ -354,22 +353,22 @@ def _backward_one_row(
     # Init pointers
     # Inputs
     DO_blk_ptrs = DO_head_seq_ptr + \
-        (stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :])
+                  (stride_dom * M_blk_idxs[:, None] + stride_dod * D_range[None, :])
 
     K_blk_ptrs = K_head_seq_ptr + \
-        (stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :])
+                 (stride_kn * N_blk_idxs[:, None] + stride_kd * D_range[None, :])
     Q_blk_ptrs = Q_head_seq_ptr + \
-        (stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :])
+                 (stride_qm * M_blk_idxs[:, None] + stride_qd * D_range[None, :])
     V_blk_ptrs = V_head_seq_ptr + \
-        (stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :])
+                 (stride_vn * N_blk_idxs[:, None] + stride_vd * D_range[None, :])
     A_blk_ptrs = A_head_seq_ptr + stride_am * M_blk_idxs
     # Outputs
     DQ_blk_ptrs = DQ_head_seq_ptr + \
-        (stride_dqm * M_blk_idxs[:, None] + stride_dqd * D_range[None, :])
+                  (stride_dqm * M_blk_idxs[:, None] + stride_dqd * D_range[None, :])
     DK_blk_ptrs = DK_head_seq_ptr + \
-        (stride_dkn * N_blk_idxs[:, None] + stride_dkd * D_range[None, :])
+                  (stride_dkn * N_blk_idxs[:, None] + stride_dkd * D_range[None, :])
     DV_blk_ptrs = DV_head_seq_ptr + \
-        (stride_dvn * N_blk_idxs[:, None] + stride_dvd * D_range[None, :])
+                  (stride_dvn * N_blk_idxs[:, None] + stride_dvd * D_range[None, :])
     DR_blk_ptrs = DR_head_seq_ptr + stride_drm * M_blk_idxs
 
     # --- Load band vectors ---
@@ -437,10 +436,10 @@ def _backward_one_row(
 
         # --- Do gradient stuff ---
         att_dA = p * \
-            (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None])
+                 (tl.dot(do, tl.trans(v), allow_tf32=ALLOW_TF32) - dr[:, None])
         cumul_att_dA = (
-            tl.dot(att_dA.to(cm.dtype), fwd_cm,
-                   allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
+                tl.dot(att_dA.to(cm.dtype), fwd_cm,
+                       allow_tf32=ALLOW_TF32) + grad_prev_acc[:, None]
         )  # 180 -> 174
         # cumul_att_dA = tl.cumsum(att_dA, axis=1) + grad_prev_acc[:, None] # 180 -> 174
         grad_prev_acc += tl.sum(att_dA, axis=1)
@@ -482,18 +481,18 @@ def _backward_one_row(
 
 
 def varlen_bwd(
-    do: torch.Tensor,
-    dr: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlens: int,
-    neg_log_acc: torch.Tensor,
-    logit_scale,
-    attend_current=False,
-    BLOCK_M=64,
-    BLOCK_N=32,
+        do: torch.Tensor,
+        dr: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlens: int,
+        neg_log_acc: torch.Tensor,
+        logit_scale,
+        attend_current=False,
+        BLOCK_M=64,
+        BLOCK_N=32,
 ):
     batch_size = cu_seqlens.size(0)
     num_heads, token_size, dim_size = q.size()
@@ -541,29 +540,29 @@ def varlen_bwd(
 
 @custom_op("varlen_bwd", mutates_args={"dq", "dk", "dv"})
 def _compileable_backward(
-    do: torch.Tensor,
-    dr: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    neg_log_acc: torch.Tensor,
-    logit_scale: float,
-    BLOCK_M: int,
-    BLOCK_N: int,
-    batch_size: int,
-    num_heads: int,
-    token_size: int,
-    dim_size: int,
-    dq: torch.Tensor,
-    dk: torch.Tensor,
-    dv: torch.Tensor,
-    # dkdv_lock: torch.Tensor,
-    # dkdv_count: torch.Tensor,
-    num_sequences: int,
-    num_folded_heads: int,
-    num_seq_blocks: int,
-    attend_current: bool = False,
+        do: torch.Tensor,
+        dr: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        neg_log_acc: torch.Tensor,
+        logit_scale: float,
+        BLOCK_M: int,
+        BLOCK_N: int,
+        batch_size: int,
+        num_heads: int,
+        token_size: int,
+        dim_size: int,
+        dq: torch.Tensor,
+        dk: torch.Tensor,
+        dv: torch.Tensor,
+        # dkdv_lock: torch.Tensor,
+        # dkdv_count: torch.Tensor,
+        num_sequences: int,
+        num_folded_heads: int,
+        num_seq_blocks: int,
+        attend_current: bool = False,
 ) -> None:
     BLOCK_D = triton.next_power_of_2(dim_size)
     N_count = num_seq_blocks * (BLOCK_M // BLOCK_N)

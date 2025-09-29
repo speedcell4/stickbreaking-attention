@@ -1,10 +1,11 @@
-import torch
-import pytest
 import math
-from torch.nn import functional as F
-from stickbreaking_attention.sb_varlen import sb_attn_varlen
+
+import pytest
+import torch
 from transformers import set_seed
+
 from stickbreaking_attention.sb_ref import stickbreaking
+from stickbreaking_attention.sb_varlen import sb_attn_varlen
 
 
 def ref_fwd(q, k, v, lengths, attend_current=False):
@@ -26,6 +27,7 @@ def ref_fwd(q, k, v, lengths, attend_current=False):
         outputs.append(o[0])
     return torch.cat(outputs, 1)
 
+
 def ref_bwd(do, q, k, v, lengths, attend_current=False):
     q.requires_grad = True
     k.requires_grad = True
@@ -40,6 +42,7 @@ def ref_bwd(do, q, k, v, lengths, attend_current=False):
     v.grad = None
     return output, dq, dk, dv
 
+
 def assert_close(varname, a, b, eps):
     if torch.isnan(a).any():
         print("Reference is nan")
@@ -47,7 +50,7 @@ def assert_close(varname, a, b, eps):
     assert not torch.isnan(b).any()
     diff = (a - b).abs()
 
-    max_diff= diff.max()
+    max_diff = diff.max()
     if max_diff < eps:
         print(varname, max_diff.item())
     else:
@@ -56,7 +59,6 @@ def assert_close(varname, a, b, eps):
         err_locs = (diff.sum(0).median(dim=1)[0] > eps).int()
         print(err_locs, err_locs.sum())
         assert max_diff < eps, max_diff
-
 
 
 class TestClass:
@@ -81,7 +83,7 @@ class TestClass:
         total_length = lengths.sum()
         cu_seqlens = torch.cumsum(lengths, dim=-1)
         v = 0.25 * torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32)
-        q = 0.25 * (torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) + 1) 
+        q = 0.25 * (torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) + 1)
         k = 0.25 * (torch.randn((num_heads, total_length, head_dim), device=device, dtype=torch.float32) - 1)
         print(q.max(), k.max(), v.max())
         q = q.to(dtype)

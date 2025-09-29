@@ -6,7 +6,6 @@ import triton.language as tl
 from .sb_bwd import _bwd
 from .sb_fwd import _fwd
 
-
 FWD_BLOCK_M: tl.constexpr = 64
 FWD_BLOCK_N: tl.constexpr = 32
 BWD_BLOCK_M: tl.constexpr = 64

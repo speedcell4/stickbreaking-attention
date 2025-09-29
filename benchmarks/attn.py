@@ -1,13 +1,13 @@
-import torch
-import pytest
 import math
-from torch.nn import functional as F
-from stickbreaking_attention.sb_attn import sb_attn
+
+import torch
 import triton
 from flash_attn import flash_attn_func
 from flash_attn.flash_attn_triton import flash_attn_func as triton_flash_attn_func
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, rotate_half
 from transformers import set_seed
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, rotate_half
+
+from stickbreaking_attention.sb_attn import sb_attn
 
 
 def tri_fwdbwd(do, q, k, v):
@@ -19,6 +19,7 @@ def tri_fwdbwd(do, q, k, v):
     # o = o + rem[..., None] * v
     return o
 
+
 def flash_fwdbwd(rope, position_ids, do, q, k, v):
     cos, sin = rope(v, position_ids)
     cos = cos.unsqueeze(-2)
@@ -28,6 +29,7 @@ def flash_fwdbwd(rope, position_ids, do, q, k, v):
     o = flash_attn_func(q, k, v, causal=True)
     # o = o.permute(0, 2, 1, 3)
     return o
+
 
 def triton_flash_fwdbwd(rope, position_ids, do, q, k, v):
     cos, sin = rope(v, position_ids)
@@ -45,6 +47,8 @@ providers = [
     ("flash", "Flash Attention", ("green", "-")),
     # ("triton_flash", "Triton Flash", ("red", "-")), # triton flash not working
 ]
+
+
 @triton.testing.perf_report([
     triton.testing.Benchmark(
         x_names=["length"],
@@ -89,7 +93,6 @@ def benchmark_attn(batch_size, num_heads, head_dim, length, dtype, provider, bwd
         return triton.testing.do_bench(fun_, warmup=warmup, rep=rep)
     else:
         return triton.testing.do_bench(fun, warmup=warmup, rep=rep)
-
 
 
 if __name__ == "__main__":

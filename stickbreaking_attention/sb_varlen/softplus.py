@@ -1,4 +1,3 @@
-import torch
 import triton
 from triton import language as tl
 

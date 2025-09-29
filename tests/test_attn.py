@@ -1,8 +1,10 @@
-import torch
-import pytest
 import math
-from stickbreaking_attention.sb_attn import sb_attn
+
+import pytest
+import torch
 from transformers import set_seed
+
+from stickbreaking_attention.sb_attn import sb_attn
 from stickbreaking_attention.sb_ref import stickbreaking
 from .test_varlen import assert_close
 
@@ -16,6 +18,7 @@ def ref_fwd(q, k, v, length, attend_current=False):
     o, rem = stickbreaking(q, k, v, mask, cm)
     o = o + rem[..., None] * v
     return o
+
 
 def ref_fwdbwd(do, q, k, v, length, attend_current=False):
     q.requires_grad = True
@@ -47,7 +50,7 @@ class TestClass:
         device = torch.device('cuda:0')
         input_dims = (batch_size, num_heads, length, head_dim)
         v = 0.25 * torch.randn(input_dims, device=device, dtype=torch.float32)
-        q = 0.25 * (torch.randn(input_dims, device=device, dtype=torch.float32) + 1) 
+        q = 0.25 * (torch.randn(input_dims, device=device, dtype=torch.float32) + 1)
         k = 0.25 * (torch.randn(input_dims, device=device, dtype=torch.float32) - 1)
         print(q.max(), k.max(), v.max())
         q = q.to(dtype).requires_grad_()
@@ -56,7 +59,7 @@ class TestClass:
         do = torch.randn(input_dims, device=device, dtype=dtype)
 
         with torch.cuda.device(device):
-            o, rem= sb_attn(
+            o, rem = sb_attn(
                 q, k, v,
                 inv_temp=1 / math.sqrt(q.size(-1)),
                 attend_current=attend_current
